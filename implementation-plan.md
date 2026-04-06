@@ -3,7 +3,187 @@
 ## Goal
 Support loading and rendering Ghostty-style GLSL shaders (ShaderToy format with `mainImage` entry point) in Wezterm, using Wezterm's existing `custom_shaders` config option. Support both WebGpu and OpenGL backends.
 
-## High-Level Architecture
+## Existing Code Flow (WGSL Shaders - WebGpu Only)
+
+### CONFIG LOADING
+```
+config/src/lib.rs:637-640
+│
+└─► custom_shaders paths added to file watch list (hot-reload)
+
+config/src/config.rs:1339-1344
+│
+└─► Relative paths resolved to absolute (relative to config dir)
+```
+
+### SHADER INITIALIZATION (on window create or config reload)
+```
+termwindow/mod.rs:894,1848
+│
+└─► reload_post_process_shaders()
+    │
+    ├─► if custom_shaders is empty: clear post_process state, return
+    │
+    ├─► if frontend != WebGpu: warn and return (shaders need WebGpu)
+    │
+    └─► PostProcessState::new(device, format, width, height, shader_paths)
+        │
+        ├─► Create bind group layouts:
+        │   • texture_bind_group_layout (binding 0: texture_2d, binding 1: sampler)
+        │   • uniform_bind_group_layout (binding 0: uniform buffer)
+        │
+        ├─► FOR EACH shader_path:
+        │   │
+        │   └─► compile_postprocess_shader(device, path, format, layouts)
+        │         │
+        │         ├─► std::fs::read(path) → raw bytes
+        │         │
+        │         ├─► prepare_shader_source(bytes, path)
+        │         │   • Strip UTF-8 BOM if present
+        │         │   • Validate UTF-8 encoding
+        │         │   • Check non-empty
+        │         │   • Prepend POSTPROCESS_PREAMBLE
+        │         │   • Return full WGSL source
+        │         │
+        │         ├─► device.create_shader_module(Wgsl(source))
+        │         │   (error scope catches validation errors)
+        │         │
+        │         ├─► device.create_pipeline_layout(bind_group_layouts)
+        │         │
+        │         └─► device.create_render_pipeline()
+        │               • vertex: vs_postprocess (fullscreen triangle)
+        │               • fragment: fs_postprocess (user entry)
+        │               └─► Option<RenderPipeline> (None on error)
+        │
+        ├─► Create intermediate texture (terminal render target)
+        │
+        ├─► Create ping-pong texture (if >1 shaders)
+        │
+        ├─► Create sampler, bind groups, uniform buffer
+        │
+        └─► Return PostProcessState or None if all shaders failed
+```
+
+### RENDER LOOP (every frame)
+```
+termwindow/render/draw.rs:52-269 :: call_draw_webgpu()
+│
+├─► webgpu.surface.get_current_texture() → output
+│
+├─► render_target = post_process.is_some()
+│                    ? intermediate_view
+│                    : surface_view
+│
+├─► [Render terminal layers → render_target]
+│
+└─► if post_process.is_some():
+      │
+      ├─► Build PostProcessUniform:
+      │   • resolution: [width, height]
+      │   • time: elapsed seconds since window creation
+      │   • time_delta: frame delta
+      │   • frame: incrementing counter
+      │
+      ├─► queue.write_buffer(&uniform_buffer, uniform)
+      │
+      └─► FOR EACH (i, pipeline) in pipelines:
+            │
+            ├─► ping_pong_targets(i, count) → (read_src, write_dst)
+            │   • i=0, last:     read Intermediate → write Surface
+            │   • i=0, not last: read Intermediate → write PingPong
+            │   • i odd, last:   read PingPong    → write Surface
+            │   • i odd, !last:  read PingPong    → write Intermediate
+            │   • i even, !last: read Intermediate → write PingPong
+            │
+            ├─► render_pass.set_pipeline(pipeline)
+            ├─► render_pass.set_bind_group(0, read_bind_group)
+            ├─► render_pass.set_bind_group(1, uniform_bind_group)
+            └─► render_pass.draw(0..3, 0..1)  // fullscreen triangle
+
+    output.present()
+```
+
+### TEXTURE PING-PONG (2 shader chain example)
+```
+┌─────────────────┐         ┌─────────────┐         ┌───────────┐         ┌─────────┐
+│ Terminal Layers │         │ INTERMEDIATE│         │  PINGPONG │         │ SURFACE │
+└────────┬────────┘         └──────┬──────┘         └─────┬─────┘         └────┬────┘
+         │                         │                      │                    │
+         │ Render to               │                      │                    │
+         └────────────────────────►│                      │                    │
+                                   │                      │                    │
+                                   ▼                      │                    │
+                            ┌──────┴──────┐               │                    │
+                            │  Shader 0   │               │                    │
+                            └──────┬──────┘               │                    │
+                                   │                      │                    │
+                                   │ write                │                    │
+                                   └─────────────────────►│                    │
+                                                          │                    │
+                                                          ▼                    │
+                                                   ┌──────┴──────┐             │
+                                                   │  Shader 1   │             │
+                                                   └──────┬──────┘             │
+                                                          │                    │
+                                                          │ write              │
+                                                          └───────────────────►│
+                                                                               │
+                                                                               ▼
+                                                                        ┌──────┴──────┐
+                                                                        │   present   │
+                                                                        └──────┬──────┘
+                                                                               │
+                                                                               ▼
+                                                                        ┌─────────┐
+                                                                        │  Screen │
+                                                                        └─────────┘
+```
+
+For N shaders: alternate between INTERMEDIATE and PINGPONG,
+last shader always writes to SURFACE
+
+### SHADER PREAMBLE (webgpu.rs:58-89 POSTPROCESS_PREAMBLE)
+```
+const POSTPROCESS_PREAMBLE: &str = "
+    struct PostProcessUniform {
+        resolution: vec2<f32>,
+        time: f32,
+        time_delta: f32,
+        frame: u32,
+        _padding: [u32; 3]
+    }
+
+    struct VertexOutput {
+        @builtin(position) position: vec4<f32>,
+        @location(0) uv: vec2<f32>
+    }
+
+    @group(0) @binding(0) var screen_texture: texture_2d<f32>
+    @group(0) @binding(1) var screen_sampler: sampler
+    @group(1) @binding(0) var<uniform> pp: PostProcessUniform
+
+    @vertex
+    fn vs_postprocess(vertex_index: u32) -> VertexOutput {
+        // Fullscreen triangle from vertex_index
+        // x = (vertex_index & 1) * 4 - 1  -> [-1, 3]
+        // y = (vertex_index >> 1) * 4 - 1 -> [-1, 3]
+    }
+";
+
+User shader provides ONLY:
+    fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32>
+```
+
+### KEY FILES
+```
+config/src/config.rs          - custom_shaders config field, path resolution
+config/src/lib.rs             - file watcher setup for hot-reload
+termwindow/mod.rs             - PostProcessState storage, reload trigger
+termwindow/webgpu.rs          - PostProcessState, preamble, compilation
+termwindow/render/draw.rs     - Render loop, ping-pong execution
+```
+
+## High-Level Architecture (GLSL Support)
 
 ```
 User GLSL shader (mainImage entry)
@@ -35,11 +215,8 @@ User GLSL shader (mainImage entry)
    - Parse via naga GLSL front-end
 
 2. **Define uniform alias mapping**
-   - Map each Ghostty uniform to Wezterm equivalent
-   - `iResolution` → `wez_resolution`
-   - `iTime` → `wez_time`
-   - `iChannel0` → `wez_screen_texture`
-   - (full list derived from ghostty's shadertoy_prefix.glsl)
+   - Map Ghostty uniforms → Wezterm equivalents
+   - Full list from ghostty's shadertoy_prefix.glsl
 
 3. **Wrap user shader with preamble**
    - Inject uniform struct definition (Wezterm naming)
@@ -55,7 +232,7 @@ User GLSL shader (mainImage entry)
 
 5. **OpenGL target (GLSL output)**
    - Use naga's `back::glsl::write()` to generate GLSL
-   - Requires OpenGL shader pipeline path (investigate existing OpenGL renderer)
+   - Investigate existing OpenGL renderer path
    - May need vertex shader coordination
 
 ### Phase 3: Uniform Binding Integration
@@ -93,10 +270,6 @@ User GLSL shader (mainImage entry)
     - Missing uniforms: Preprocessor aliases only define what we support
     - Validation on shader load, not render loop
 
-## Open Questions
-
-_(None currently - all resolved during planning)_
-
 ## Dependencies
 
 - **naga** (already bundled with wgpu) - GLSL parsing and WGSL/GLSL output
@@ -104,4 +277,4 @@ _(None currently - all resolved during planning)_
 
 ## Files to Modify/Create
 
-_(To be detailed during implementation)_
+TBD
