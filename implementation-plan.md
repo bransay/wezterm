@@ -183,7 +183,7 @@ termwindow/webgpu.rs          - PostProcessState, preamble, compilation
 termwindow/render/draw.rs     - Render loop, ping-pong execution
 ```
 
-## HIGH-LEVEL ARCHITECTURE (GLSL Support)
+## High-Level Architecture (GLSL Support)
 
 ```
 User GLSL shader (mainImage entry)
@@ -196,7 +196,7 @@ User GLSL shader (mainImage entry)
 [naga GLSL output] ─→ OpenGL backend
 ```
 
-## KEY DECISIONS
+## Key Decisions
 
 - **Parser**: naga GLSL parser (pure Rust, already bundled with wgpu)
 - **Uniform renaming**: Preprocessor `#define` aliases (e.g., `#define iResolution wez_resolution`)
@@ -204,7 +204,7 @@ User GLSL shader (mainImage entry)
 - **Config UX**: Auto-detect GLSL by `.glsl` extension, `.wgsl` stays as-is
 - **Error handling**: Graceful degradation like existing WGSL shader errors
 
-## IMPLEMENTATION STEPS
+## Implementation Steps
 
 ### Phase 1: GLSL Parsing Pipeline
 
@@ -270,11 +270,11 @@ User GLSL shader (mainImage entry)
     - Missing uniforms: Preprocessor aliases only define what we support
     - Validation on shader load, not render loop
 
-## DEPENDENCIES
+## Dependencies
 
 - **naga** (already bundled with wgpu) - GLSL parsing and WGSL/GLSL output
 - No new external dependencies
 
-## FILES TO MODIFY/CREATE
+## Files to Modify/Create
 
 TBD
