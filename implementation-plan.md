@@ -5,7 +5,7 @@ Support loading and rendering Ghostty-style GLSL shaders (ShaderToy format with 
 
 ## Existing Code Flow (WGSL Shaders - WebGpu Only)
 
-### CONFIG LOADING
+### Config Loading
 ```
 config/src/lib.rs:637-640
 │
@@ -16,7 +16,7 @@ config/src/config.rs:1339-1344
 └─► Relative paths resolved to absolute (relative to config dir)
 ```
 
-### SHADER INITIALIZATION (on window create or config reload)
+### Shader Initialization (on window create or config reload)
 ```
 termwindow/mod.rs:894,1848
 │
@@ -64,7 +64,7 @@ termwindow/mod.rs:894,1848
         └─► Return PostProcessState or None if all shaders failed
 ```
 
-### RENDER LOOP (every frame)
+### Render Loop (every frame)
 ```
 termwindow/render/draw.rs:52-269 :: call_draw_webgpu()
 │
@@ -103,7 +103,7 @@ termwindow/render/draw.rs:52-269 :: call_draw_webgpu()
     output.present()
 ```
 
-### TEXTURE PING-PONG (2 shader chain example)
+### Texture Ping-Pong (2 shader chain example)
 ```
 ┌─────────────────┐         ┌─────────────┐         ┌───────────┐         ┌─────────┐
 │ Terminal Layers │         │ INTERMEDIATE│         │  PINGPONG │         │ SURFACE │
@@ -142,7 +142,7 @@ termwindow/render/draw.rs:52-269 :: call_draw_webgpu()
 For N shaders: alternate between INTERMEDIATE and PINGPONG,
 last shader always writes to SURFACE
 
-### SHADER PREAMBLE (webgpu.rs:58-89 POSTPROCESS_PREAMBLE)
+### Shader Preamble (webgpu.rs:58-89 POSTPROCESS_PREAMBLE)
 ```
 const POSTPROCESS_PREAMBLE: &str = "
     struct PostProcessUniform {
@@ -174,7 +174,7 @@ User shader provides ONLY:
     fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32>
 ```
 
-### KEY FILES
+### Key Files
 ```
 config/src/config.rs          - custom_shaders config field, path resolution
 config/src/lib.rs             - file watcher setup for hot-reload
