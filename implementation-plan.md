@@ -134,9 +134,9 @@ termwindow/render/draw.rs:52-269 :: call_draw_webgpu()
                                                                         └──────┬──────┘
                                                                                │
                                                                                ▼
-                                                                        ┌─────────┐
-                                                                        │  Screen │
-                                                                        └─────────┘
+                                                                          ┌─────────┐
+                                                                          │  Screen │
+                                                                          └─────────┘
 ```
 
 For N shaders: alternate between INTERMEDIATE and PINGPONG,
