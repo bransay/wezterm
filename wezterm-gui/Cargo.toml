@@ -65,6 +65,7 @@ metrics.workspace = true
 mlua = {workspace=true, features=["send", "serialize"]}
 mux-lua.workspace = true
 mux.workspace = true
+naga = { version = "25", features = ["glsl-in", "wgsl-out"] }
 nucleo-matcher.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true

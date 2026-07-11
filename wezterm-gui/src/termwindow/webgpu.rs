@@ -1,6 +1,6 @@
 use crate::quad::Vertex;
 use anyhow::anyhow;
-use config::{ConfigHandle, GpuInfo, WebGpuPowerPreference};
+use config::{ConfigHandle, GpuInfo, ImportedShaderPathBuf, ShaderPathBuf, WebGpuPowerPreference};
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
@@ -88,6 +88,20 @@ fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 ";
 
+/// Vertex shader for imported (cross-compiled) shaders.
+/// The naga-emitted WGSL from GLSL has its own fragment entry point and uniforms,
+/// so we only prepend this vertex shader. The fragment shader uses `gl_FragCoord`
+/// which naga maps to `@builtin(position)`, so the vertex shader output is just
+/// the fullscreen triangle position.
+const POSTPROCESS_VERTEX_SHADER: &str = "\
+@vertex
+fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    let x = f32(i32(vertex_index & 1u) * 4 - 1);
+    let y = f32(i32(vertex_index >> 1u) * 4 - 1);
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+";
+
 /// Strip BOM, decode UTF-8, validate non-empty, and prepend the standard
 /// preamble. Returns the full WGSL source ready for compilation, or None
 /// on any input problem (logged).
@@ -134,29 +148,57 @@ pub(crate) fn prepare_shader_source(raw_bytes: &[u8], path: &Path) -> Option<Str
     Some(format!("{}{}", POSTPROCESS_PREAMBLE, source_str))
 }
 
-/// Compile a single post-process shader from a file path.
-/// Returns None on any failure (missing file, bad WGSL, pipeline error)
+/// Compile a single post-process shader from a shader path.
+/// Routes `Native` paths through the existing WGSL pipeline and `Imported`
+/// paths through the shader import (cross-compilation) module.
+/// Returns None on any failure (missing file, bad shader, pipeline error)
 /// without crashing — errors are logged.
 fn compile_postprocess_shader(
     device: &wgpu::Device,
-    path: &Path,
+    shader: &ShaderPathBuf,
     format: wgpu::TextureFormat,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> Option<wgpu::RenderPipeline> {
-    let raw_source = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log::error!(
-                "postprocess: failed to read shader file {}: {:#}",
-                path.display(),
-                e
-            );
-            return None;
+    let path = shader.as_path();
+
+    // Obtain WGSL source: either directly (native) or via cross-compilation (imported)
+    let (full_source, fragment_entry_point) = match shader {
+        ShaderPathBuf::Native(_) => {
+            let raw_source = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log::error!(
+                        "postprocess: failed to read shader file {}: {:#}",
+                        path.display(),
+                        e
+                    );
+                    return None;
+                }
+            };
+            let source = prepare_shader_source(&raw_source, path)?;
+            (source, "fs_postprocess")
+        }
+        ShaderPathBuf::Imported(imported) => {
+            match crate::termwindow::shader_import::import_shader(imported) {
+                Ok(wgsl) => {
+                    // The emitted WGSL from naga has a vertex shader only if the
+                    // GLSL provided one. Our imported shaders are fragment-only,
+                    // so we prepend the vertex shader from the preamble.
+                    let source = format!("{}\n{}", POSTPROCESS_VERTEX_SHADER, wgsl);
+                    (source, "main")
+                }
+                Err(e) => {
+                    log::error!(
+                        "postprocess: failed to import shader {}: {:#}",
+                        path.display(),
+                        e
+                    );
+                    return None;
+                }
+            }
         }
     };
-
-    let full_source = prepare_shader_source(&raw_source, path)?;
 
     // Use error scopes to catch validation errors without crashing
     device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -197,7 +239,7 @@ fn compile_postprocess_shader(
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader_module,
-            entry_point: Some("fs_postprocess"),
+            entry_point: Some(fragment_entry_point),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: None, // post-process replaces pixels, no blending
@@ -250,7 +292,7 @@ impl PostProcessState {
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
-        shader_paths: &[std::path::PathBuf],
+        shader_paths: &[ShaderPathBuf],
     ) -> Option<Self> {
         if width == 0 || height == 0 {
             log::warn!("postprocess: skipping creation with zero dimensions");
@@ -1249,7 +1291,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(&device, &shader_path, format, &texture_bgl, &uniform_bgl);
+        let result = compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl);
         assert!(result.is_some(), "Valid shader should compile successfully");
     }
 
@@ -1267,7 +1309,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(&device, &shader_path, format, &texture_bgl, &uniform_bgl);
+        let result = compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl);
         assert!(result.is_none(), "Invalid shader should return None");
     }
 
@@ -1295,7 +1337,7 @@ fn wrong_name(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(&device, &shader_path, format, &texture_bgl, &uniform_bgl);
+        let result = compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl);
         assert!(result.is_none(), "Missing entry point should return None");
     }
 
@@ -1311,7 +1353,7 @@ fn wrong_name(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let result = compile_postprocess_shader(
             &device,
-            &PathBuf::from("/nonexistent/shader.wgsl"),
+            &ShaderPathBuf::Native(PathBuf::from("/nonexistent/shader.wgsl")),
             format,
             &texture_bgl,
             &uniform_bgl,
@@ -1340,7 +1382,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         .unwrap();
 
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let state = PostProcessState::new(&device, format, 800, 600, &[shader_path]);
+        let state = PostProcessState::new(&device, format, 800, 600, &[ShaderPathBuf::Native(shader_path)]);
         assert!(state.is_some(), "Single valid shader should create state");
         let state = state.unwrap();
         assert_eq!(state.pipelines.len(), 1);
@@ -1367,7 +1409,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         std::fs::write(&path2, shader_body).unwrap();
 
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let state = PostProcessState::new(&device, format, 800, 600, &[path1, path2]);
+        let state = PostProcessState::new(&device, format, 800, 600, &[ShaderPathBuf::Native(path1), ShaderPathBuf::Native(path2)]);
         assert!(state.is_some(), "Two valid shaders should create state");
         let state = state.unwrap();
         assert_eq!(state.pipelines.len(), 2);
@@ -1390,8 +1432,8 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         .unwrap();
 
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        assert!(PostProcessState::new(&device, format, 0, 600, &[shader_path.clone()]).is_none());
-        assert!(PostProcessState::new(&device, format, 800, 0, &[shader_path]).is_none());
+        assert!(PostProcessState::new(&device, format, 0, 600, &[ShaderPathBuf::Native(shader_path.clone())]).is_none());
+        assert!(PostProcessState::new(&device, format, 800, 0, &[ShaderPathBuf::Native(shader_path)]).is_none());
     }
 
     #[test]
@@ -1407,7 +1449,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
             format,
             800,
             600,
-            &[PathBuf::from("/no/such/a.wgsl"), PathBuf::from("/no/such/b.wgsl")],
+            &[ShaderPathBuf::Native(PathBuf::from("/no/such/a.wgsl")), ShaderPathBuf::Native(PathBuf::from("/no/such/b.wgsl"))],
         );
         assert!(result.is_none(), "No valid shaders should return None");
     }
@@ -1438,7 +1480,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
             format,
             800,
             600,
-            &[valid_path, PathBuf::from("/no/such/bad.wgsl")],
+            &[ShaderPathBuf::Native(valid_path), ShaderPathBuf::Native(PathBuf::from("/no/such/bad.wgsl"))],
         );
         assert!(state.is_some(), "Mixed valid/invalid should still create state");
         assert_eq!(state.unwrap().pipelines.len(), 1);
@@ -1465,7 +1507,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         .unwrap();
 
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let mut state = PostProcessState::new(&device, format, 800, 600, &[shader_path]).unwrap();
+        let mut state = PostProcessState::new(&device, format, 800, 600, &[ShaderPathBuf::Native(shader_path)]).unwrap();
 
         assert!(state.resize(&device, 1024, 768), "Resize to valid dims should return true");
         assert!(!state.resize(&device, 0, 768), "Resize to zero width should return false");
@@ -1608,7 +1650,7 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         .unwrap();
 
         let pipeline =
-            compile_postprocess_shader(&device, &shader_path, format, &texture_bgl, &uniform_bgl)
+            compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl)
                 .expect("Inversion shader should compile");
 
         // --- Render pass ---

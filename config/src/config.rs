@@ -560,11 +560,14 @@ pub struct Config {
     #[dynamic(default)]
     pub background: Vec<BackgroundLayer>,
 
-    /// Paths to custom post-processing fragment shaders (WGSL).
+    /// Paths to custom post-processing fragment shaders.
+    /// Each entry is either a bare path (WGSL, native) or a tagged object
+    /// (e.g. `{ path = "crt.glsl", format = "Ghostty" }`) for imported formats
+    /// that get cross-compiled to WGSL.
     /// These are applied in order after the terminal is rendered.
     /// Relative paths are resolved relative to the config file directory.
     #[dynamic(default)]
-    pub custom_shaders: Vec<PathBuf>,
+    pub custom_shaders: Vec<crate::ShaderPathBuf>,
 
     /// Only works on MacOS
     #[dynamic(default)]
@@ -1336,12 +1339,11 @@ impl Config {
                 }
             }
 
-            for shader_path in &mut cfg.custom_shaders {
-                if !shader_path.is_absolute() {
-                    let dir = config_dir.join(&shader_path);
-                    *shader_path = dir;
-                }
-            }
+            cfg.custom_shaders = cfg
+                .custom_shaders
+                .into_iter()
+                .map(|s| s.join_relative_to(&config_dir))
+                .collect();
         }
 
         // Add some reasonable default font rules
