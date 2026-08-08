@@ -115,7 +115,7 @@ fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
             error: e,
         })?;
 
-    Ok(ResolvedShader::new(wgsl, path_str))
+    Ok(ResolvedShader::new(wgsl, std::path::PathBuf::from(path_str)))
 }
 
 fn compile_glsl_to_spirv(

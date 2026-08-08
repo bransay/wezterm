@@ -98,11 +98,11 @@ fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 pub struct ResolvedShader {
     pub source: String,
     #[cfg(debug_assertions)]
-    pub path: String,
+    pub path: std::path::PathBuf,
 }
 
 impl ResolvedShader {
-    pub fn new(source: String, path: impl Into<String>) -> Self {
+    pub fn new(source: String, path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             source,
             #[cfg(debug_assertions)]
@@ -131,7 +131,7 @@ pub(crate) fn resolve_shader(shader: &ShaderPathBuf) -> Option<ResolvedShader> {
                 }
             };
             let source = prepare_shader_source(&raw_source, path)?;
-            Some(ResolvedShader::new(source, path.display().to_string()))
+            Some(ResolvedShader::new(source, path.to_path_buf()))
         }
         ShaderPathBuf::Imported(imported) => {
             match crate::termwindow::shader_import::import_shader(imported) {
@@ -206,14 +206,14 @@ fn compile_postprocess_shader(
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> Option<wgpu::RenderPipeline> {
     #[cfg(debug_assertions)]
-    let path = resolved.path.as_str();
+    let path = resolved.path.as_path();
     #[cfg(not(debug_assertions))]
-    let path = "postprocess";
+    let path = std::path::Path::new("postprocess");
 
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(&format!("PostProcess Shader: {}", path)),
+        label: Some(&format!("PostProcess Shader: {}", path.display())),
         source: wgpu::ShaderSource::Wgsl(resolved.source.clone().into()),
     });
 
@@ -222,7 +222,7 @@ fn compile_postprocess_shader(
     if let Some(err) = shader_error {
         log::error!(
             "postprocess: shader compilation failed for {}: {:#}",
-            path,
+            path.display(),
             err
         );
         return None;
@@ -230,7 +230,7 @@ fn compile_postprocess_shader(
 
     // Build the pipeline layout: group 0 = texture+sampler, group 1 = uniform
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("PostProcess Pipeline Layout: {}", path)),
+        label: Some(&format!("PostProcess Pipeline Layout: {}", path.display())),
         bind_group_layouts: &[texture_bind_group_layout, uniform_bind_group_layout],
         push_constant_ranges: &[],
     });
@@ -238,7 +238,7 @@ fn compile_postprocess_shader(
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(&format!("PostProcess Pipeline: {}", path)),
+        label: Some(&format!("PostProcess Pipeline: {}", path.display())),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader_module,
@@ -279,7 +279,7 @@ fn compile_postprocess_shader(
     if let Some(err) = pipeline_error {
         log::error!(
             "postprocess: render pipeline creation failed for {}: {:#}",
-            path,
+            path.display(),
             err
         );
         return None;
@@ -287,7 +287,7 @@ fn compile_postprocess_shader(
 
     log::info!(
         "postprocess: successfully compiled shader {}",
-        path
+        path.display()
     );
     Some(pipeline)
 }
