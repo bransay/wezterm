@@ -206,29 +206,31 @@ fn compile_postprocess_shader(
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> Option<wgpu::RenderPipeline> {
     #[cfg(debug_assertions)]
-    let label = resolved.path.as_str();
+    let path = resolved.path.as_str();
     #[cfg(not(debug_assertions))]
-    let label = "postprocess";
+    let path = "postprocess";
 
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(&format!("PostProcess Shader: {}", label)),
+        label: Some(&format!("PostProcess Shader: {}", path)),
         source: wgpu::ShaderSource::Wgsl(resolved.source.clone().into()),
     });
 
+    // Poll for validation errors from shader compilation
     let shader_error = smol::block_on(device.pop_error_scope());
     if let Some(err) = shader_error {
         log::error!(
             "postprocess: shader compilation failed for {}: {:#}",
-            label,
+            path,
             err
         );
         return None;
     }
 
+    // Build the pipeline layout: group 0 = texture+sampler, group 1 = uniform
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("PostProcess Pipeline Layout: {}", label)),
+        label: Some(&format!("PostProcess Pipeline Layout: {}", path)),
         bind_group_layouts: &[texture_bind_group_layout, uniform_bind_group_layout],
         push_constant_ranges: &[],
     });
@@ -236,12 +238,12 @@ fn compile_postprocess_shader(
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(&format!("PostProcess Pipeline: {}", label)),
+        label: Some(&format!("PostProcess Pipeline: {}", path)),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader_module,
             entry_point: Some("vs_postprocess"),
-            buffers: &[],
+            buffers: &[], // fullscreen triangle, no vertex buffers
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -249,7 +251,7 @@ fn compile_postprocess_shader(
             entry_point: Some("fs_postprocess"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None,
+                blend: None, // post-process replaces pixels, no blending
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -277,13 +279,16 @@ fn compile_postprocess_shader(
     if let Some(err) = pipeline_error {
         log::error!(
             "postprocess: render pipeline creation failed for {}: {:#}",
-            label,
+            path,
             err
         );
         return None;
     }
 
-    log::info!("postprocess: successfully compiled shader {}", label);
+    log::info!(
+        "postprocess: successfully compiled shader {}",
+        path
+    );
     Some(pipeline)
 }
 
