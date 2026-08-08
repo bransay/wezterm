@@ -1,6 +1,6 @@
 use crate::quad::Vertex;
 use anyhow::anyhow;
-use config::{ConfigHandle, GpuInfo, ImportedShaderPathBuf, ShaderPathBuf, WebGpuPowerPreference};
+use config::{ConfigHandle, GpuInfo, ShaderPathBuf, WebGpuPowerPreference};
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
@@ -88,19 +88,66 @@ fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 ";
 
-/// Vertex shader for imported (cross-compiled) shaders.
-/// The naga-emitted WGSL from GLSL has its own fragment entry point and uniforms,
-/// so we only prepend this vertex shader. The fragment shader uses `gl_FragCoord`
-/// which naga maps to `@builtin(position)`, so the vertex shader output is just
-/// the fullscreen triangle position.
-const POSTPROCESS_VERTEX_SHADER: &str = "\
-@vertex
-fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
-    let x = f32(i32(vertex_index & 1u) * 4 - 1);
-    let y = f32(i32(vertex_index >> 1u) * 4 - 1);
-    return vec4<f32>(x, y, 0.0, 1.0);
+/// A fully composed WGSL shader ready for the post-process pipeline.
+///
+/// Contract: the WGSL must contain:
+/// - `vs_postprocess` vertex entry point (fullscreen triangle)
+/// - `fs_postprocess` fragment entry point
+/// - Bind group 0: `screen_texture` (texture_2d<f32>) at binding 0, `screen_sampler` (sampler) at binding 1
+/// - Bind group 1: `pp` uniform of type `PostProcessUniform` at binding 0
+pub struct ResolvedShader {
+    pub source: String,
+    #[cfg(debug_assertions)]
+    pub path: String,
 }
-";
+
+impl ResolvedShader {
+    pub fn new(source: String, path: impl Into<String>) -> Self {
+        Self {
+            source,
+            #[cfg(debug_assertions)]
+            path: path.into(),
+        }
+    }
+}
+
+/// Resolve a shader path into a fully composed WGSL shader.
+///
+/// Routes `Native` paths through the existing WGSL preamble and `Imported`
+/// paths through the shader import (cross-compilation) module. Both produce
+/// a `ResolvedShader` satisfying the pipeline contract.
+pub(crate) fn resolve_shader(shader: &ShaderPathBuf) -> Option<ResolvedShader> {
+    match shader {
+        ShaderPathBuf::Native(path) => {
+            let raw_source = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log::error!(
+                        "postprocess: failed to read shader file {}: {:#}",
+                        path.display(),
+                        e
+                    );
+                    return None;
+                }
+            };
+            let source = prepare_shader_source(&raw_source, path)?;
+            Some(ResolvedShader::new(source, path.display().to_string()))
+        }
+        ShaderPathBuf::Imported(imported) => {
+            match crate::termwindow::shader_import::import_shader(imported) {
+                Ok(resolved) => Some(resolved),
+                Err(e) => {
+                    log::error!(
+                        "postprocess: failed to import shader {}: {:#}",
+                        shader.as_path().display(),
+                        e
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
 
 /// Strip BOM, decode UTF-8, validate non-empty, and prepend the standard
 /// preamble. Returns the full WGSL source ready for compilation, or None
@@ -148,80 +195,40 @@ pub(crate) fn prepare_shader_source(raw_bytes: &[u8], path: &Path) -> Option<Str
     Some(format!("{}{}", POSTPROCESS_PREAMBLE, source_str))
 }
 
-/// Compile a single post-process shader from a shader path.
-/// Routes `Native` paths through the existing WGSL pipeline and `Imported`
-/// paths through the shader import (cross-compilation) module.
-/// Returns None on any failure (missing file, bad shader, pipeline error)
+/// Compile a single post-process shader from a resolved WGSL shader.
+/// Returns None on any failure (bad WGSL, pipeline error)
 /// without crashing — errors are logged.
 fn compile_postprocess_shader(
     device: &wgpu::Device,
-    shader: &ShaderPathBuf,
+    resolved: &ResolvedShader,
     format: wgpu::TextureFormat,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> Option<wgpu::RenderPipeline> {
-    let path = shader.as_path();
+    #[cfg(debug_assertions)]
+    let label = resolved.path.as_str();
+    #[cfg(not(debug_assertions))]
+    let label = "postprocess";
 
-    // Obtain WGSL source: either directly (native) or via cross-compilation (imported)
-    let (full_source, fragment_entry_point) = match shader {
-        ShaderPathBuf::Native(_) => {
-            let raw_source = match std::fs::read(path) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    log::error!(
-                        "postprocess: failed to read shader file {}: {:#}",
-                        path.display(),
-                        e
-                    );
-                    return None;
-                }
-            };
-            let source = prepare_shader_source(&raw_source, path)?;
-            (source, "fs_postprocess")
-        }
-        ShaderPathBuf::Imported(imported) => {
-            match crate::termwindow::shader_import::import_shader(imported) {
-                Ok(wgsl) => {
-                    // The emitted WGSL from naga has a vertex shader only if the
-                    // GLSL provided one. Our imported shaders are fragment-only,
-                    // so we prepend the vertex shader from the preamble.
-                    let source = format!("{}\n{}", POSTPROCESS_VERTEX_SHADER, wgsl);
-                    (source, "main")
-                }
-                Err(e) => {
-                    log::error!(
-                        "postprocess: failed to import shader {}: {:#}",
-                        path.display(),
-                        e
-                    );
-                    return None;
-                }
-            }
-        }
-    };
-
-    // Use error scopes to catch validation errors without crashing
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(&format!("PostProcess Shader: {}", path.display())),
-        source: wgpu::ShaderSource::Wgsl(full_source.into()),
+        label: Some(&format!("PostProcess Shader: {}", label)),
+        source: wgpu::ShaderSource::Wgsl(resolved.source.clone().into()),
     });
 
-    // Poll for validation errors from shader compilation
     let shader_error = smol::block_on(device.pop_error_scope());
     if let Some(err) = shader_error {
         log::error!(
             "postprocess: shader compilation failed for {}: {:#}",
-            path.display(),
+            label,
             err
         );
         return None;
     }
 
-    // Build the pipeline layout: group 0 = texture+sampler, group 1 = uniform
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("PostProcess Pipeline Layout: {}", path.display())),
+        label: Some(&format!("PostProcess Pipeline Layout: {}", label)),
         bind_group_layouts: &[texture_bind_group_layout, uniform_bind_group_layout],
         push_constant_ranges: &[],
     });
@@ -229,20 +236,20 @@ fn compile_postprocess_shader(
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(&format!("PostProcess Pipeline: {}", path.display())),
+        label: Some(&format!("PostProcess Pipeline: {}", label)),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader_module,
             entry_point: Some("vs_postprocess"),
-            buffers: &[], // fullscreen triangle, no vertex buffers
+            buffers: &[],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader_module,
-            entry_point: Some(fragment_entry_point),
+            entry_point: Some("fs_postprocess"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None, // post-process replaces pixels, no blending
+                blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -270,16 +277,13 @@ fn compile_postprocess_shader(
     if let Some(err) = pipeline_error {
         log::error!(
             "postprocess: render pipeline creation failed for {}: {:#}",
-            path.display(),
+            label,
             err
         );
         return None;
     }
 
-    log::info!(
-        "postprocess: successfully compiled shader {}",
-        path.display()
-    );
+    log::info!("postprocess: successfully compiled shader {}", label);
     Some(pipeline)
 }
 
@@ -342,13 +346,14 @@ impl PostProcessState {
                 label: Some("PostProcess uniform bind group layout"),
             });
 
-        // Compile all shader pipelines, skipping any that fail
+        // Resolve and compile all shader pipelines, skipping any that fail
         let pipelines: Vec<wgpu::RenderPipeline> = shader_paths
             .iter()
-            .filter_map(|path| {
+            .filter_map(|shader_path| {
+                let resolved = resolve_shader(shader_path)?;
                 compile_postprocess_shader(
                     device,
-                    path,
+                    &resolved,
                     format,
                     &texture_bind_group_layout,
                     &uniform_bind_group_layout,
@@ -1291,7 +1296,11 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl);
+        let result = {
+            let shader_path = ShaderPathBuf::Native(shader_path);
+            let resolved = resolve_shader(&shader_path).unwrap();
+            compile_postprocess_shader(&device, &resolved, format, &texture_bgl, &uniform_bgl)
+        };
         assert!(result.is_some(), "Valid shader should compile successfully");
     }
 
@@ -1309,7 +1318,11 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl);
+        let result = {
+            let shader_path = ShaderPathBuf::Native(shader_path);
+            let resolved = resolve_shader(&shader_path).unwrap();
+            compile_postprocess_shader(&device, &resolved, format, &texture_bgl, &uniform_bgl)
+        };
         assert!(result.is_none(), "Invalid shader should return None");
     }
 
@@ -1337,7 +1350,11 @@ fn wrong_name(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl);
+        let result = {
+            let shader_path = ShaderPathBuf::Native(shader_path);
+            let resolved = resolve_shader(&shader_path).unwrap();
+            compile_postprocess_shader(&device, &resolved, format, &texture_bgl, &uniform_bgl)
+        };
         assert!(result.is_none(), "Missing entry point should return None");
     }
 
@@ -1351,13 +1368,14 @@ fn wrong_name(in: VertexOutput) -> @location(0) vec4<f32> {
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
 
-        let result = compile_postprocess_shader(
-            &device,
-            &ShaderPathBuf::Native(PathBuf::from("/nonexistent/shader.wgsl")),
-            format,
-            &texture_bgl,
-            &uniform_bgl,
-        );
+        let result = {
+            let shader_path = ShaderPathBuf::Native(PathBuf::from("/nonexistent/shader.wgsl"));
+            let resolved = resolve_shader(&shader_path);
+            match resolved {
+                Some(r) => compile_postprocess_shader(&device, &r, format, &texture_bgl, &uniform_bgl),
+                None => None,
+            }
+        };
         assert!(result.is_none(), "Missing file should return None");
     }
 
@@ -1649,9 +1667,12 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         )
         .unwrap();
 
-        let pipeline =
-            compile_postprocess_shader(&device, &ShaderPathBuf::Native(shader_path), format, &texture_bgl, &uniform_bgl)
-                .expect("Inversion shader should compile");
+        let pipeline = {
+            let shader_path = ShaderPathBuf::Native(shader_path);
+            let resolved = resolve_shader(&shader_path).unwrap();
+            compile_postprocess_shader(&device, &resolved, format, &texture_bgl, &uniform_bgl)
+                .expect("Inversion shader should compile")
+        };
 
         // --- Render pass ---
         let mut encoder =

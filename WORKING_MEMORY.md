@@ -31,3 +31,21 @@ Entry shape:
 - **Files:** config/src/shader.rs (new), config/src/lib.rs:37-38,57-58, config/src/config.rs:563-569,1342-1349, wezterm-gui/Cargo.toml:67, wezterm-gui/src/termwindow/shader_import.rs (new), wezterm-gui/src/termwindow/mod.rs:84, wezterm-gui/src/termwindow/webgpu.rs:3,56-107,137-201,253,1385-1510
 - **Refs:** PLAN.md#phase-1, DD-001 through DD-010
 - **Next:** Phase 2 — Testing & Validation with real ghostty-shaders repo
+
+## [2026-08-08 14:00] Phase 1: DD-011 pivot — glslang→SPIR-V→naga pipeline rewrite
+- **Did:** Switched from naga GLSL-in to glslang→SPIR-V→naga spv-in pipeline (DD-011). Added `glslang = "0.8"` runtime dep, changed naga features to `spv-in` + `wgsl-out`. Rewrote `shader_import.rs` with glslang compile → SPIR-V → naga parse → IR manipulation → WGSL emit. Added `ResolvedShader` newtype and `resolve_shader` funnel in `webgpu.rs`. Simplified `compile_postprocess_shader` to take `&ResolvedShader`. Hit `InvalidId(49)` error — naga's SPV frontend can't handle `OpLoad` of `OpTypeSampledImage` (combined image sampler). Diagnosed via SPIR-V dump test: glslang emits `OpLoad` of combined `sampler2D` variable, but naga expects separate `OpTypeImage` + `OpTypeSampler` combined via `OpSampledImage`.
+- **Files:** wezterm-gui/Cargo.toml:56,69, wezterm-gui/src/termwindow/shader_import.rs (rewritten), wezterm-gui/src/termwindow/webgpu.rs:96-103,116-161
+- **Refs:** PLAN.md#phase-1, DD-011
+- **Next:** Resolve combined sampler issue
+
+## [2026-08-08 15:30] Phase 1: DD-012 through DD-014 — patch file + IR redesign
+- **Did:** Design-focused implementation session. Diagnosed combined sampler limitation fully. Proposed patch file approach: keep verbatim ghostty prefix, apply build-time `.patch` to split `sampler2D iChannel0` into separate `texture2D` + `sampler` + `#define` macro, move Globals to `set = 1`. Patch matches wezterm's bind group layout exactly (texture: set 0 binding 0, sampler: set 0 binding 1, uniform: set 1 binding 0). IR manipulation reduced to: replace Globals struct (DD-014, build fresh 4-member struct matching `PostProcessUniform`), add vertex shader (DD-013, programmatic naga IR not string concat), rename entry point. Recorded DD-012, DD-013, DD-014. Created patch file `ghostty_shadertoy_prefix.patch`. Started build.rs integration.
+- **Files:** wezterm-gui/src/termwindow/shaders/ghostty_shadertoy_prefix.patch (new), DESIGN_DECISIONS.md (DD-012 through DD-014)
+- **Refs:** PLAN.md#phase-1, DD-012 through DD-014
+- **Next:** Finish build.rs patch integration, implement IR manipulation functions, test
+
+## [2026-08-08 16:30] Phase 1: Implementation complete — patch + IR + tests all passing
+- **Did:** Implemented all three chunks. (1) Patch file `ghostty_shadertoy_prefix.patch` created — splits `sampler2D iChannel0` into `texture2D` + `sampler` + `#define` macro, moves Globals to `set = 1, binding = 0`. build.rs applies patch at build time via `patch` command, writes patched file to `OUT_DIR`, `include_str!` picks it up. (2) `shader_import.rs` rewritten: deleted `remap_bindings` (patch handles bindings), deleted `strip_unused_uniforms` (replaced by `replace_globals_struct`), implemented `replace_globals_struct` (builds fresh 4-member struct matching `PostProcessUniform`: iResolution vec2, iTime f32, iTimeDelta f32, iFrame i32), implemented `add_vertex_shader` (constructs `vs_postprocess` fullscreen triangle in naga IR — pre-emitted expressions appended outside emitter, computed expressions inside), `rename_entry_point` kept. (3) Deleted `POSTPROCESS_VERTEX_SHADER` const from `webgpu.rs`, removed `spirv` dev-dep, deleted `test_dump_spirv` debug test. All tests pass: 35 wezterm-gui, 15 config.
+- **Files:** wezterm-gui/src/termwindow/shaders/ghostty_shadertoy_prefix.patch (new), wezterm-gui/build.rs:3-7,196-241 (patch_shadertoy_prefix), wezterm-gui/src/termwindow/shader_import.rs (rewritten IR functions), wezterm-gui/src/termwindow/webgpu.rs (deleted POSTPROCESS_VERTEX_SHADER), wezterm-gui/Cargo.toml (removed spirv dev-dep)
+- **Refs:** PLAN.md#phase-1, DD-012 through DD-014
+- **Next:** Phase 2 — Testing & Validation with real ghostty-shaders repo

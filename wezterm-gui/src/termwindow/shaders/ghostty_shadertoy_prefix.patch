@@ -1,0 +1,34 @@
+--- ghostty_shadertoy_prefix.glsl	2026-08-08 13:05:27.543554947 -0700
++++ -	2026-08-08 13:05:27.545325677 -0700
+@@ -1,6 +1,6 @@
+ #version 430 core
+ 
+-layout(binding = 1, std140) uniform Globals {
++layout(set = 1, binding = 0, std140) uniform Globals {
+     uniform vec3  iResolution;
+     uniform float iTime;
+     uniform float iTimeDelta;
+@@ -36,12 +36,18 @@
+ #define CURSORSTYLE_UNDERLINE    3
+ #define CURSORSTYLE_LOCK         4
+ 
+-layout(binding = 0) uniform sampler2D iChannel0;
++layout(set = 0, binding = 0) uniform texture2D iChannel0_tex;
++layout(set = 0, binding = 1) uniform sampler iChannel0_samp;
++#define iChannel0 sampler2D(iChannel0_tex, iChannel0_samp)
+ 
+-// These are unused currently by Ghostty:
+-// layout(binding = 1) uniform sampler2D iChannel1;
+-// layout(binding = 2) uniform sampler2D iChannel2;
+-// layout(binding = 3) uniform sampler2D iChannel3;
++// These channels are unused. If needed, they would be split
++// into separate texture2D + sampler declarations similarly.
++// layout(set = 0, binding = 2) uniform texture2D iChannel1_tex;
++// layout(set = 0, binding = 3) uniform sampler iChannel1_samp;
++// layout(set = 0, binding = 4) uniform texture2D iChannel2_tex;
++// layout(set = 0, binding = 5) uniform sampler iChannel2_samp;
++// layout(set = 0, binding = 6) uniform texture2D iChannel3_tex;
++// layout(set = 0, binding = 7) uniform sampler iChannel3_samp;
+ 
+ layout(location = 0) in vec4 gl_FragCoord;
+ layout(location = 0) out vec4 _fragColor;

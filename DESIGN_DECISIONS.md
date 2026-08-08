@@ -117,3 +117,43 @@ Entry shape:
 - **Rationale:** SRP. The import module normalizes imported shaders to WGSL, full stop. The OpenGL backend owns its own cross-compilation logic. Calling "import" not "translate" keeps the module's responsibility clear.
 - **Alternatives considered:** `shader_translate` — rejected as conflating normalization with cross-compilation. `shader_normalize` — rejected, Bryan preferred "import."
 - **Consequences:** Future OpenGL backend cross-compilation lives in a separate module, not here.
+
+## DD-011: Switch from naga GLSL-in to glslang + naga SPIR-V-in pipeline
+- **Date:** 2026-07-03
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** naga's GLSL frontend is too opinionated — can't handle combined `sampler2D` globals with initializers, requires `layout(set)` qualifiers, can't use ghostty's `shadertoy_prefix.glsl` verbatim. Required source-level workarounds (text substitution via `defines`, separate texture/sampler declarations, modified preamble). Two layers of string-mashing: GLSL preamble concat before parse, WGSL vertex shader concat after emit.
+- **Decision:** Replace naga GLSL-in with glslang (GLSL → SPIR-V) → naga (SPIR-V-in → WGSL-out). Use ghostty's `shadertoy_prefix.glsl` verbatim (or near-verbatim) as the GLSL prefix — glslang handles combined `sampler2D`, `layout(binding)` without `set`, and all other GLSL features the prefix requires.
+- **Rationale:** Eliminates all string-mashing workarounds. glslang is a full GLSL compiler (same tool ghostty uses). naga's SPIR-V front-end is more robust than its GLSL front-end. The pipeline mirrors ghostty's own approach (glslang → SPIR-V → target). Using ghostty's prefix verbatim means we can pull it as a reference/patch from the ghostty repo rather than maintaining our own modified copy.
+- **Alternatives considered:** (1) naga GLSL-in with modified prefix (current V1 implementation) — rejected due to parser limitations and string-mashing. (2) glslang → SPIR-V → wgpu `ShaderSource::SpirV` directly (skip WGSL) — rejected because it would require a parallel pipeline separate from the existing WGSL-based `PostProcessState`, doubling maintenance. (3) glslang + spirv-cross (ghostty's full pipeline) — rejected because spirv-cross has no WGSL backend.
+- **Consequences:** Adds glslang as a build dependency (C++ library, needs build integration). Adds naga `spv-in` feature. `shader_import.rs` rewritten: prefix GLSL with ghostty's `shadertoy_prefix.glsl`, compile via glslang to SPIR-V, parse SPIR-V via naga, emit WGSL via naga. The `POSTPROCESS_VERTEX_SHADER` concat in `webgpu.rs` may still be needed (naga emits a complete WGSL module from SPIR-V). The `iChannel0` `defines` workaround is removed. shadertoy_prefix.glsl can be sourced from ghostty repo via submodule/patch.
+
+## DD-012: Patch file for prefix divergence instead of verbatim modification
+- **Date:** 2026-08-08
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** DD-011 intended to use ghostty's prefix verbatim. However, naga's SPIR-V frontend cannot handle combined image samplers (`OpTypeSampledImage` loaded via `OpLoad`) — it expects separate `OpTypeImage` + `OpTypeSampler` combined via `OpSampledImage`. GLSL's `sampler2D` is a combined type; glslang emits the combined SPIR-V pattern naga can't parse. Need to split `sampler2D iChannel0` into separate `texture2D` + `sampler` at the GLSL level using GLSL 4.2+ separate texture/sampler syntax. Also need to move Globals block to `set = 1` to match wezterm's bind group layout (group 0 = texture+sampler, group 1 = uniform).
+- **Decision:** Keep the verbatim `ghostty_shadertoy_prefix.glsl` file syncable from ghostty. Apply a `.patch` file at build time (in `build.rs`) to produce a patched prefix with: (1) `sampler2D iChannel0` split into `texture2D iChannel0_tex` + `sampler iChannel0_samp` + `#define iChannel0 sampler2D(iChannel0_tex, iChannel0_samp)`, (2) Globals block moved to `layout(set = 1, binding = 0)`. The patched file is generated into `OUT_DIR` and `include_str!`'d.
+- **Rationale:** Explicit, reviewable divergence from upstream. When ghostty updates the prefix, re-sync the `.glsl` and re-apply the patch — if it conflicts, `patch` fails loudly. Keeps the verbatim file clean for diffing against upstream. The patch captures the wezterm-specific layout mapping (separate samplers for naga compatibility, set/binding placement for wezterm's pipeline).
+- **Alternatives considered:** (1) Runtime string transformation in Rust — rejected as less explicit/reviewable. (2) Modify the prefix file directly — rejected as losing syncability with ghostty. (3) naga IR binding remap instead of patch-level set placement — rejected as mixing concerns (GLSL layout vs IR manipulation).
+- **Consequences:** Build-time dependency on `patch` utility. Patch file must be maintained when ghostty prefix changes. The patched prefix matches wezterm's bind group layout exactly — naga IR no longer needs `remap_bindings`. IR manipulation reduces to: replace Globals struct (shrink to 4 members matching `PostProcessUniform`), add vertex shader (programmatic in naga IR), rename entry point.
+
+## DD-013: Vertex shader in naga IR, not string concat
+- **Date:** 2026-08-08
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** The existing `POSTPROCESS_VERTEX_SHADER` const string in `webgpu.rs` was a WGSL string prepended to naga's emitted fragment WGSL. Considered keeping this approach (mirrors ghostty's separate vertex+fragment shader sources). User requested programmatic IR construction instead of string concat.
+- **Decision:** Construct `vs_postprocess` vertex entry point programmatically in naga IR as part of `add_vertex_shader`. Delete `POSTPROCESS_VERTEX_SHADER` const from `webgpu.rs`. The emitted WGSL is one self-contained module with both entry points.
+- **Rationale:** Cleaner — no string manipulation, one module, type-checked by naga validation. Avoids mixing levels (IR manipulation vs WGSL string). User preference for programmatic approach over string hacks.
+- **Alternatives considered:** Keep `POSTPROCESS_VERTEX_SHADER` string prepend (ghostty's approach) — rejected per user preference for programmatic IR.
+- **Consequences:** `add_vertex_shader` must construct naga IR for a fullscreen triangle vertex shader — types, expressions, function body built programmatically. More complex than string concat but more robust. `POSTPROCESS_VERTEX_SHADER` const deleted.
+
+## DD-014: Replace Globals struct in naga IR, not strip
+- **Date:** 2026-08-08
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** Ghostty's Globals block has 27 members; wezterm's `PostProcessUniform` has 4 (resolution, time, time_delta, frame). Stripping unused members isn't enough — field order and types differ (`iResolution` is vec3 in ghostty, vec2 in wezterm). The uniform buffer layout must match wezterm's exactly or runtime binding fails.
+- **Decision:** Build a fresh replacement struct in naga IR with 4 members matching wezterm's `PostProcessUniform` layout: `iResolution` (vec2), `iTime` (f32), `iTimeDelta` (f32), `iFrame` (i32). Keep ghostty's field names so user shader code (`iResolution.xy`, `iTime`, etc.) works. Replace the Globals struct type handle in the global variable.
+- **Rationale:** Building a fresh struct is simpler than strip+reorder+resize — one operation instead of three. Field names preserved for shader compatibility, types match wezterm's buffer layout. `iResolution` shrinks vec3→vec2 (shaders using `.z` for pixel ratio break — acceptable V1 limitation per DD-001).
+- **Alternatives considered:** Strip unused members + reorder + resize — rejected as more complex for same result.
+- **Consequences:** `replace_globals_struct` function in `shader_import.rs`. Shaders using `iResolution.z` break (V1 limitation). `iFrame` declared as `i32` in IR (wezterm writes `u32` — same bytes, non-negative values reinterpret cleanly).
