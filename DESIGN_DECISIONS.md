@@ -138,15 +138,35 @@ Entry shape:
 - **Alternatives considered:** (1) Runtime string transformation in Rust — rejected as less explicit/reviewable. (2) Modify the prefix file directly — rejected as losing syncability with ghostty. (3) naga IR binding remap instead of patch-level set placement — rejected as mixing concerns (GLSL layout vs IR manipulation).
 - **Consequences:** Build-time dependency on `patch` utility. Patch file must be maintained when ghostty prefix changes. The patched prefix matches wezterm's bind group layout exactly — naga IR no longer needs `remap_bindings`. IR manipulation reduces to: replace Globals struct (shrink to 4 members matching `PostProcessUniform`), add vertex shader (programmatic in naga IR), rename entry point.
 
-## DD-013: Vertex shader in naga IR, not string concat
+## DD-013: Vertex shader as WGSL source, not naga IR construction
 - **Date:** 2026-08-08
 - **Phase:** Phase 1
-- **Status:** Accepted
+- **Status:** Superseded by DD-015
 - **Context:** The existing `POSTPROCESS_VERTEX_SHADER` const string in `webgpu.rs` was a WGSL string prepended to naga's emitted fragment WGSL. Considered keeping this approach (mirrors ghostty's separate vertex+fragment shader sources). User requested programmatic IR construction instead of string concat.
 - **Decision:** Construct `vs_postprocess` vertex entry point programmatically in naga IR as part of `add_vertex_shader`. Delete `POSTPROCESS_VERTEX_SHADER` const from `webgpu.rs`. The emitted WGSL is one self-contained module with both entry points.
 - **Rationale:** Cleaner — no string manipulation, one module, type-checked by naga validation. Avoids mixing levels (IR manipulation vs WGSL string). User preference for programmatic approach over string hacks.
 - **Alternatives considered:** Keep `POSTPROCESS_VERTEX_SHADER` string prepend (ghostty's approach) — rejected per user preference for programmatic IR.
 - **Consequences:** `add_vertex_shader` must construct naga IR for a fullscreen triangle vertex shader — types, expressions, function body built programmatically. More complex than string concat but more robust. `POSTPROCESS_VERTEX_SHADER` const deleted.
+
+## DD-015: Vertex shader as WGSL source file, parsed via naga wgsl-in
+- **Date:** 2026-08-08
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** DD-013 built the vertex shader programmatically in naga IR (~200 lines of arena/expression/emitter manipulation). User found this too verbose to maintain. Wanted WGSL source file included via `include_str!` (same pattern as the ghostty prefix). Initial attempt to parse WGSL vertex source and push the entry point across module arenas failed — naga handles are arena-local, can't cross modules.
+- **Decision:** Emit fragment WGSL after IR manipulation (replace_globals_struct + rename_entry_point only), concat with standalone WGSL vertex shader source (`ghostty_fullscreen_vertex.wgsl`), re-parse the combined string via `naga::front::wgsl::parse_str` into a unified module, validate, emit final WGSL. The vertex shader file lives alongside the prefix in `shaders/`. Per-import-format (ghostty's fragment input is `@builtin(position)` from `gl_FragCoord`; other formats may differ). Added `wgsl-in` as runtime naga feature.
+- **Rationale:** WGSL source file is readable, editable, diffable — same pattern as the GLSL prefix. naga handles module merging via re-parse — no manual handle remapping. Double parse+emit at startup is acceptable (runs once per shader). Validation on the unified module catches interface mismatches.
+- **Alternatives considered:** (1) Push entry point across module arenas — rejected, handles are arena-local. (2) Manual handle remapping from vertex module into fragment module — rejected, exactly the fragility we're eliminating. (3) Post-emit string concat without re-parse — rejected, no validation of combined module.
+- **Consequences:** `add_vertex_shader` IR function deleted. `wgsl-in` moves from dev-dep to runtime dep. Import pipeline: GLSL → SPIR-V → IR → replace_globals + rename → emit fragment WGSL → concat vertex WGSL → re-parse → validate → emit final WGSL. `WgslParseError` added to `ShaderImportError`. DD-013 superseded.
+
+## DD-016: Separate vertex+fragment modules — user-owned bindings, no IR merging
+- **Date:** 2026-08-08
+- **Phase:** Phase 2
+- **Status:** Accepted
+- **Context:** DD-015's WGSL re-parse concat approach was criticized as cargo-culting — it re-parsed to "validate the combined module" when concat + wgpu's own validation does the job. Investigated alternatives: (1) naga has no linker and no module merge — handles are arena-local, cross-module pushes fail; (2) SPIR-V-level stage consolidation needs a linker glslang's Rust bindings don't expose (compile() consumes the program, one stage per program); (3) glslang can't merge stages — it's per-stage by design. Concluded any shared-module approach needs manual handle remapping. Then explored whether wezterm's pipeline even needs a single module. Found `compile_postprocess_shader` (webgpu.rs:243-258) currently passes the *same* module to both `VertexState` and `FragmentState`, but wgpu supports separate modules per stage.
+- **Decision:** Imported shader formats emit a **pair** of WGSL files — one vertex, one fragment — compiled as independent naga modules and wired into the pipeline as separate `ShaderModule`s. No merging, no handle remapping, no IR construction, no re-parse. Resource bindings are declared by the author in each stage; the pipeline layout is the shared contract. wgpu validates VS/FS binding agreement at pipeline creation. The merge/re-synthesis problem is explicitly deferred to a future binding-synthesis layer that ties a type to a slot once and generates the `@group/@binding` declarations into both stages.
+- **Rationale:** Eliminates the entire shared-module merge problem class — the varying-interface hole, the binding-collision ambiguity, the handle-remapping fragility all stop mattering because nothing is auto-unified. Separate modules give identifier-name isolation (both stages can declare a global named `Globals`). wgpu's `ShaderStages` visibility on bind group layout entries lets slots be shared (`VERTEX|FRAGMENT`) or stage-restricted. Cost is binding boilerplate duplicated across both stages — accepted, and the synthesis layer is the future fix.
+- **Alternatives considered:** (1) Single module + IR construction (DD-013) — works but verbose; user found it too hard to maintain. (2) Single module + WGSL re-parse concat (DD-015) — re-parse was cargo-culting. (3) Single module + generic handle-remap merger matching by `(set,binding)` + layout — rejected: layout matching is semantically weak, and the varying interface has no external contract to pin it, so cross-stage unification is unsound. (4) SPIR-V stage consolidation via glslang Program/link — rejected: Rust bindings expose one stage per compile() call, and it'd require writing a linker.
+- **Consequences:** The future binding-synthesis layer is the enhancement path. Imported formats need to author/synthesize both a vertex and fragment WGSL file. `compile_postprocess_shader` changes to accept two `ShaderModule`s (or two resolved sources). This supersedes the concat-in-DD-015 direction. DD-013 and DD-015 both superseded by this direction.
 
 ## DD-014: Replace Globals struct in naga IR, not strip
 - **Date:** 2026-08-08

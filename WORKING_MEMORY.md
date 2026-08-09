@@ -49,3 +49,21 @@ Entry shape:
 - **Files:** wezterm-gui/src/termwindow/shaders/ghostty_shadertoy_prefix.patch (new), wezterm-gui/build.rs:3-7,196-241 (patch_shadertoy_prefix), wezterm-gui/src/termwindow/shader_import.rs (rewritten IR functions), wezterm-gui/src/termwindow/webgpu.rs (deleted POSTPROCESS_VERTEX_SHADER), wezterm-gui/Cargo.toml (removed spirv dev-dep)
 - **Refs:** PLAN.md#phase-1, DD-012 through DD-014
 - **Next:** Phase 2 — Testing & Validation with real ghostty-shaders repo
+
+## [2026-08-08 17:00] Phase 1: ResolvedShader.path String→PathBuf
+- **Did:** Switched `ResolvedShader.path` from `String` to `std::path::PathBuf` for semantic correctness — a path is a path. Constructor now takes `impl Into<PathBuf>`. `compile_postprocess_shader` uses `path.display()` matching original code exactly (minimal diff). Updated call sites: `resolve_shader` passes `path.to_path_buf()`, `shader_import.rs` wraps `PathBuf::from(path_str)`. All 35 wezterm-gui tests pass.
+- **Files:** wezterm-gui/src/termwindow/webgpu.rs, wezterm-gui/src/termwindow/shader_import.rs
+- **Refs:** DD-014
+- **Next:** Phase 2 — Testing & Validation with real ghostty-shaders repo
+
+## [2026-08-08 21:30] Phase 1: DD-015 — vertex shader WGSL source file replaces IR construction
+- **Did:** Replaced 200-line `add_vertex_shader` IR construction with WGSL source file approach. Created `ghostty_fullscreen_vertex.wgsl` (fullscreen triangle, only builtins: `@builtin(vertex_index)` → `@builtin(position)`). Import pipeline now: GLSL → SPIR-V → IR → `replace_globals_struct` + `rename_entry_point` → emit fragment WGSL → concat with vertex WGSL source → re-parse combined via `naga::front::wgsl::parse_str` → validate → emit final WGSL. Initial attempt to push entry point across module arenas failed (handles are arena-local); emit-concat-reparse flow avoids handle remapping entirely. Moved `wgsl-in` from naga dev-dep to runtime dep. Added `WgslParseError` to `ShaderImportError`. DD-013 superseded by DD-015. All 35 wezterm-gui tests pass.
+- **Files:** wezterm-gui/src/termwindow/shaders/ghostty_fullscreen_vertex.wgsl (new), wezterm-gui/src/termwindow/shader_import.rs (deleted add_vertex_shader, rewrote import_ghostty pipeline), wezterm-gui/Cargo.toml (wgsl-in runtime, removed naga dev-dep)
+- **Refs:** DD-015
+- **Next:** Phase 2 — Testing & Validation with real ghostty-shaders repo
+
+## [2026-08-08 22:15] Phase 1: Design investigation — separate vertex+fragment modules (DD-016)
+- **Did:** Design investigation into how to provide the vertex shader without IR construction. Tried parse-WGSL→push-entry-point (failed: naga handles are arena-local, can't cross modules). Implemented DD-015 emit-concat-reparse (worked, tests green) but Bryan flagged the re-parse as cargo-culting. Investigated glslang Program/link for stage consolidation — Rust bindings expose one stage per compile(), no linker. Investigated naga module merge — naga has no linker. Explored wgpu per-stage ShaderModule support — confirmed `compile_postprocess_shader` currently reuses one module but wgpu allows separate modules. Concluded separate vertex+fragment modules with user-owned bindings (DD-016) eliminates the merge problem entirely; wgpu validates VS/FS binding agreement at pipeline creation. Recorded DD-016 as proposed. Changes NOT yet reverted (revert pending).
+- **Files:** wezterm-gui/src/termwindow/shader_import.rs (DD-015 concat flow in place), wezterm-gui/Cargo.toml (wgsl-in runtime dep), wezterm-gui/src/termwindow/shaders/ghostty_fullscreen_vertex.wgsl (new)
+- **Refs:** DD-015, DD-016
+- **Next:** Revert DD-015 changes (concat flow), then implement DD-016 separate-modules design
