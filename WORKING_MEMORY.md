@@ -85,7 +85,13 @@ Entry shape:
 - **Next:** Commit Phase 3
 
 ## [2026-08-09 12:00] Phase 3: Full-path render test for imported shader
-- **Did:** Closed the gap — the 6 shader_import tests only exercised `compile_ghostty` (cross-compile core), not the real loading path. Added `test_imported_shader_actually_renders` in webgpu.rs mirroring `test_shader_actually_renders`: writes vendored `negative.glsl` to a temp file, routes through `ShaderPathBuf::Imported(Ghostty)` → `resolve_shader` → `import_shader` → `import_ghostty` → `compile_ghostty` → `compile_postprocess_shader` → GPU render, asserts cyan output (inverted red). Added `GhosttyPathBuf`/`ImportedShaderPathBuf` to webgpu.rs imports. All 42 wezterm-gui tests pass.
-- **Files:** wezterm-gui/src/termwindow/webgpu.rs (test_imported_shader_actually_renders, imports)
+- **Did:** Closed the gap — the 6 shader_import tests only exercised `compile_ghostty` (cross-compile core), not the real loading path. Added `test_imported_shader_actually_renders` in webgpu.rs mirroring `test_shader_actually_renders`: writes vendored `negative.glsl` to a temp file, routes through `ShaderPathBuf::Imported(Ghostty)` → `resolve_shader` → `import_shader` → `import_ghostty` → `compile_ghostty` → `compile_postprocess_shader` → GPU render, asserts cyan output (inverted red). All 42 wezterm-gui tests pass.
+- **Files:** wezterm-gui/src/termwindow/webgpu.rs (test_imported_shader_actually_renders)
 - **Refs:** PLAN.md#phase-3
 - **Next:** Commit Phase 3
+
+## [2026-08-09 12:30] Phase 3: Review refinements + commit
+- **Did:** (1) Renamed `path_label` → `source_label` in `compile_ghostty` (pairs with `shader_source`, clearer semantic). (2) Moved 6 vendored shaders into `shaders/test_fixtures/` subdir to separate test-only fixtures from runtime assets (prefix, vertex WGSL, patch). (3) Scoped `GhosttyPathBuf`/`ImportedShaderPathBuf` imports to the test module in webgpu.rs — was leaking config abstraction types into production imports for a test-only use. All 42 tests pass. Committed as `549d91fff`.
+- **Files:** wezterm-gui/src/termwindow/shader_import.rs (source_label rename), wezterm-gui/src/termwindow/shaders/test_fixtures/ (moved), wezterm-gui/src/termwindow/webgpu.rs (test-scoped imports)
+- **Refs:** PLAN.md#phase-3
+- **Next:** All 3 phases complete
