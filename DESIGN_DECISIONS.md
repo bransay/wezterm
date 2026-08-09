@@ -148,6 +148,16 @@ Entry shape:
 - **Alternatives considered:** Keep `POSTPROCESS_VERTEX_SHADER` string prepend (ghostty's approach) — rejected per user preference for programmatic IR.
 - **Consequences:** `add_vertex_shader` must construct naga IR for a fullscreen triangle vertex shader — types, expressions, function body built programmatically. More complex than string concat but more robust. `POSTPROCESS_VERTEX_SHADER` const deleted.
 
+## DD-014: Replace Globals struct in naga IR, not strip
+- **Date:** 2026-08-08
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** Ghostty's Globals block has 27 members; wezterm's `PostProcessUniform` has 4 (resolution, time, time_delta, frame). Stripping unused members isn't enough — field order and types differ (`iResolution` is vec3 in ghostty, vec2 in wezterm). The uniform buffer layout must match wezterm's exactly or runtime binding fails.
+- **Decision:** Build a fresh replacement struct in naga IR with 4 members matching wezterm's `PostProcessUniform` layout: `iResolution` (vec2), `iTime` (f32), `iTimeDelta` (f32), `iFrame` (i32). Keep ghostty's field names so user shader code (`iResolution.xy`, `iTime`, etc.) works. Replace the Globals struct type handle in the global variable.
+- **Rationale:** Building a fresh struct is simpler than strip+reorder+resize — one operation instead of three. Field names preserved for shader compatibility, types match wezterm's buffer layout. `iResolution` shrinks vec3→vec2 (shaders using `.z` for pixel ratio break — acceptable V1 limitation per DD-001).
+- **Alternatives considered:** Strip unused members + reorder + resize — rejected as more complex for same result.
+- **Consequences:** `replace_globals_struct` function in `shader_import.rs`. Shaders using `iResolution.z` break (V1 limitation). `iFrame` declared as `i32` in IR (wezterm writes `u32` — same bytes, non-negative values reinterpret cleanly).
+
 ## DD-015: Vertex shader as WGSL source file, parsed via naga wgsl-in
 - **Date:** 2026-08-08
 - **Phase:** Phase 1
@@ -173,17 +183,7 @@ Entry shape:
 - **Phase:** Phase 2
 - **Status:** Accepted
 - **Context:** DD-016 requires `compile_postprocess_shader` to build two modules. Native shaders currently rely on `POSTPROCESS_PREAMBLE` (one blob with both `vs_postprocess` and `fs_postprocess`). Considered splitting the native preamble into separate vertex/fragment consts so each resolved member carries only its own stage.
-- **Decision:** `ResolvedShader` holds `vertex: ShaderSource` and `fragment: ShaderSource`, where `ShaderSource { source: String, path: PathBuf }` (path is a `#[cfg(debug_assertions)]`-gated label for diagnostics). For native shaders, both members share the *same* preamble+user source and same path — no preamble split. WGSL modules are validated wholesale at `create_shader_module`, so the vertex module containing the fragment entry point (and vice versa) still validates if the source is correct; malformed source fails either module, net outcome identical. The split pays off for imported shaders, where vertex (static WGSL file) and fragment (naga output) genuinely differ.
+- **Decision:** `ResolvedShader` holds `vertex: Arc<ShaderSource>` and `fragment: Arc<ShaderSource>`, where `ShaderSource { source: String, path: PathBuf }` (path is a `#[cfg(debug_assertions)]`-gated label for diagnostics). `Arc` avoids deep-copying potentially large shader sources (a refcount bump instead of cloning the WGSL `String`). For native shaders, both members share the *same* preamble+user source via one shared `Arc` and same path — no preamble split. WGSL modules are validated wholesale at `create_shader_module`, so the vertex module containing the fragment entry point (and vice versa) still validates if the source is correct; malformed source fails either module, net outcome identical. The split pays off for imported shaders, where vertex (static WGSL file) and fragment (naga output) genuinely differ.
 - **Rationale:** No preamble split = less duplication and no risk of the two halves drifting out of sync. The separate-modules win is real only when stages come from different origins, which is the imported case. Native keeps a single source blob reused for both stage members. Dead-but-malformed code correctly fails syntactic validation regardless of reachability.
 - **Alternatives considered:** Split `POSTPROCESS_PREAMBLE` into `POSTPROCESS_VERTEX` and `POSTPROCESS_FRAGMENT_PREAMBLE` — rejected: unnecessary when both native stages share one source; risks struct/binding drift between the split halves.
 - **Consequences:** `resolve_shader` native path assigns the same `ShaderSource` to both members. Imported path assigns the static vertex WGSL file to `vertex` and naga output to `fragment`. `compile_postprocess_shader` creates two `ShaderModule`s and wires `VertexState`→vertex, `FragmentState`→fragment.
-
-## DD-014: Replace Globals struct in naga IR, not strip
-- **Date:** 2026-08-08
-- **Phase:** Phase 1
-- **Status:** Accepted
-- **Context:** Ghostty's Globals block has 27 members; wezterm's `PostProcessUniform` has 4 (resolution, time, time_delta, frame). Stripping unused members isn't enough — field order and types differ (`iResolution` is vec3 in ghostty, vec2 in wezterm). The uniform buffer layout must match wezterm's exactly or runtime binding fails.
-- **Decision:** Build a fresh replacement struct in naga IR with 4 members matching wezterm's `PostProcessUniform` layout: `iResolution` (vec2), `iTime` (f32), `iTimeDelta` (f32), `iFrame` (i32). Keep ghostty's field names so user shader code (`iResolution.xy`, `iTime`, etc.) works. Replace the Globals struct type handle in the global variable.
-- **Rationale:** Building a fresh struct is simpler than strip+reorder+resize — one operation instead of three. Field names preserved for shader compatibility, types match wezterm's buffer layout. `iResolution` shrinks vec3→vec2 (shaders using `.z` for pixel ratio break — acceptable V1 limitation per DD-001).
-- **Alternatives considered:** Strip unused members + reorder + resize — rejected as more complex for same result.
-- **Consequences:** `replace_globals_struct` function in `shader_import.rs`. Shaders using `iResolution.z` break (V1 limitation). `iFrame` declared as `i32` in IR (wezterm writes `u32` — same bytes, non-negative values reinterpret cleanly).
