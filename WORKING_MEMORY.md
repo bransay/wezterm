@@ -62,8 +62,11 @@ Entry shape:
 - **Refs:** DD-015
 - **Next:** Phase 2 — Testing & Validation with real ghostty-shaders repo
 
-## [2026-08-08 22:15] Phase 1: Design investigation — separate vertex+fragment modules (DD-016)
-- **Did:** Design investigation into how to provide the vertex shader without IR construction. Tried parse-WGSL→push-entry-point (failed: naga handles are arena-local, can't cross modules). Implemented DD-015 emit-concat-reparse (worked, tests green) but Bryan flagged the re-parse as cargo-culting. Investigated glslang Program/link for stage consolidation — Rust bindings expose one stage per compile(), no linker. Investigated naga module merge — naga has no linker. Explored wgpu per-stage ShaderModule support — confirmed `compile_postprocess_shader` currently reuses one module but wgpu allows separate modules. Concluded separate vertex+fragment modules with user-owned bindings (DD-016) eliminates the merge problem entirely; wgpu validates VS/FS binding agreement at pipeline creation. Recorded DD-016 as proposed. Changes NOT yet reverted (revert pending).
-- **Files:** wezterm-gui/src/termwindow/shader_import.rs (DD-015 concat flow in place), wezterm-gui/Cargo.toml (wgsl-in runtime dep), wezterm-gui/src/termwindow/shaders/ghostty_fullscreen_vertex.wgsl (new)
-- **Refs:** DD-015, DD-016
-- **Next:** Revert DD-015 changes (concat flow), then implement DD-016 separate-modules design
+## [2026-08-08 22:15] Phase 2: Design — separate vertex+fragment modules (DD-016, DD-017)
+- **Did:** Design-focused implementation pass for Phase 2. Concluded separate vertex+fragment modules with user-owned bindings (DD-016) eliminates the merge problem entirely; wgpu validates VS/FS binding agreement at pipeline creation. Recorded DD-016 (proposed) and PLAN.md Phase 2 (Split VS/FS) + renumbered old Phase 2 to Phase 3. Reworked DD-015's concat flow was reverted by Bryan (working tree clean).
+
+## [2026-08-08 23:00] Phase 2: Implemented — ResolvedShader vertex/fragment ShaderSource split
+- **Did:** Implemented Phase 2 (DD-016/DD-017). (1) `ResolvedShader` now holds `vertex: ShaderSource` + `fragment: ShaderSource`; `ShaderSource { source: String, path: PathBuf }` (path is `#[cfg(debug_assertions)]` label). (2) Native path: both members share the same preamble+user source and same path — no preamble split. (3) Imported path: `vertex` = `include_str!("shaders/ghostty_fullscreen_vertex.wgsl")` (recreated static file, fullscreen triangle, never through naga), `fragment` = naga output; `add_vertex_shader` IR construction deleted entirely from `shader_import.rs`. (4) `compile_postprocess_shader` creates two `ShaderModule`s and wires `VertexState`→vertex module, `FragmentState`→fragment module; layout/bindings unchanged. All 35 wezterm-gui tests pass (incl. GPU render tests).
+- **Files:** wezterm-gui/src/termwindow/shaders/ghostty_fullscreen_vertex.wgsl (recreated), wezterm-gui/src/termwindow/webgpu.rs (ResolvedShader/ShaderSource, resolve_shader, compile_postprocess_shader), wezterm-gui/src/termwindow/shader_import.rs (deleted add_vertex_shader, import_ghostty returns ResolvedShader)
+- **Refs:** DD-016, DD-017
+- **Next:** Phase 3 — Testing & Validation with real ghostty-shaders repo

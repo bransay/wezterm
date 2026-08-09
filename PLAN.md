@@ -18,7 +18,7 @@ Only modify this file on phase completion or plan changes.
   - **Exit criteria:** A wezterm config with `custom_shaders = { { path = "crt.glsl", format = "Ghostty" } }` loads, cross-compiles to WGSL, and renders the CRT effect on the WebGpu backend. V1 uniforms: `iResolution`, `iTime`, `iTimeDelta`, `iFrame`, `iChannel0` only.
   - **Commit:** <SHA filled in on completion>
 
-- [ ] **Phase 2: Split Vertex and Fragment Shader Modules**
+- [x] **Phase 2: Split Vertex and Fragment Shader Modules**
   - **Goal:** Decouple the vertex and fragment shader stages so each is its own independently-compiled module. Applies to native WGSL shaders too, so `ResolvedShader` and the pipeline know how to wire up separate VS/FS.
   - **Deliverable:** (1) `ResolvedShader` carries distinct vertex and fragment sources (e.g. `vertex: String`, `fragment: String`) rather than one concatenated blob. (2) Imported formats emit a pair of WGSL files — vertex + fragment — as independent naga modules. (3) `compile_postprocess_shader` creates two `ShaderModule`s (one per stage) and passes them to `VertexState`/`FragmentState` respectively. (4) Resource bindings are declared by the author in each stage; the pipeline layout is the shared contract, wgpu validates VS/FS binding agreement at pipeline creation.
   - **Exit criteria:** Native WGSL shaders and imported ghostty shaders both render with separate VS and FS modules. No module merging, handle remapping, or string concat between stages.

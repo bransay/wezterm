@@ -88,26 +88,37 @@ fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 ";
 
-/// A fully composed WGSL shader ready for the post-process pipeline.
-///
-/// Contract: the WGSL must contain:
-/// - `vs_postprocess` vertex entry point (fullscreen triangle)
-/// - `fs_postprocess` fragment entry point
-/// - Bind group 0: `screen_texture` (texture_2d<f32>) at binding 0, `screen_sampler` (sampler) at binding 1
-/// - Bind group 1: `pp` uniform of type `PostProcessUniform` at binding 0
-pub struct ResolvedShader {
+/// A single shader stage's WGSL source and a path label for diagnostics.
+pub struct ShaderSource {
     pub source: String,
     #[cfg(debug_assertions)]
     pub path: std::path::PathBuf,
 }
 
-impl ResolvedShader {
+impl ShaderSource {
     pub fn new(source: String, path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             source,
             #[cfg(debug_assertions)]
             path: path.into(),
         }
+    }
+}
+
+/// A fully resolved shader: independent vertex and fragment stage sources.
+/// Each stage is compiled as its own module; bindings are shared via the
+/// pipeline layout.
+pub struct ResolvedShader {
+    pub vertex: std::sync::Arc<ShaderSource>,
+    pub fragment: std::sync::Arc<ShaderSource>,
+}
+
+impl ResolvedShader {
+    pub fn new(
+        vertex: std::sync::Arc<ShaderSource>,
+        fragment: std::sync::Arc<ShaderSource>,
+    ) -> Self {
+        Self { vertex, fragment }
     }
 }
 
@@ -131,7 +142,9 @@ pub(crate) fn resolve_shader(shader: &ShaderPathBuf) -> Option<ResolvedShader> {
                 }
             };
             let source = prepare_shader_source(&raw_source, path)?;
-            Some(ResolvedShader::new(source, path.to_path_buf()))
+            let vs_source = std::sync::Arc::new(ShaderSource::new(source, path.to_path_buf()));
+            let fs_source = vs_source.clone();
+            Some(ResolvedShader::new(vs_source, fs_source))
         }
         ShaderPathBuf::Imported(imported) => {
             match crate::termwindow::shader_import::import_shader(imported) {
@@ -206,31 +219,41 @@ fn compile_postprocess_shader(
     uniform_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> Option<wgpu::RenderPipeline> {
     #[cfg(debug_assertions)]
-    let path = resolved.path.as_path();
+    let fragment_path = resolved.fragment.path.as_path();
     #[cfg(not(debug_assertions))]
-    let path = std::path::Path::new("postprocess");
+    let fragment_path = std::path::Path::new("<unnamed fragment shader>");
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let create_module = |source: &ShaderSource, kind: &str| -> Option<wgpu::ShaderModule> {
+        let label = {
+            #[cfg(debug_assertions)]
+            let path = source.path.display().to_string();
+            #[cfg(not(debug_assertions))]
+            let path = format!("<Unnamed {} Shader>", kind.to_lowercase());
+            format!("PostProcess {} Shader: {}", kind, path)
+        };
 
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(&format!("PostProcess Shader: {}", path.display())),
-        source: wgpu::ShaderSource::Wgsl(resolved.source.clone().into()),
-    });
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&label),
+            source: wgpu::ShaderSource::Wgsl(source.source.clone().into()),
+        });
+        let shader_error = smol::block_on(device.pop_error_scope());
+        if let Some(err) = shader_error {
+            log::error!("postprocess: {} shader compilation failed: {:#}", kind, err);
+            return None;
+        }
+        Some(module)
+    };
 
-    // Poll for validation errors from shader compilation
-    let shader_error = smol::block_on(device.pop_error_scope());
-    if let Some(err) = shader_error {
-        log::error!(
-            "postprocess: shader compilation failed for {}: {:#}",
-            path.display(),
-            err
-        );
-        return None;
-    }
+    let vertex_module = create_module(&resolved.vertex, "Vertex")?;
+    let fragment_module = create_module(&resolved.fragment, "Fragment")?;
 
     // Build the pipeline layout: group 0 = texture+sampler, group 1 = uniform
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("PostProcess Pipeline Layout: {}", path.display())),
+        label: Some(&format!(
+            "PostProcess Pipeline Layout: {}",
+            fragment_path.display()
+        )),
         bind_group_layouts: &[texture_bind_group_layout, uniform_bind_group_layout],
         push_constant_ranges: &[],
     });
@@ -238,16 +261,19 @@ fn compile_postprocess_shader(
     device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(&format!("PostProcess Pipeline: {}", path.display())),
+        label: Some(&format!(
+            "PostProcess Pipeline: {}",
+            fragment_path.display()
+        )),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
-            module: &shader_module,
+            module: &vertex_module,
             entry_point: Some("vs_postprocess"),
             buffers: &[], // fullscreen triangle, no vertex buffers
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader_module,
+            module: &fragment_module,
             entry_point: Some("fs_postprocess"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -279,7 +305,7 @@ fn compile_postprocess_shader(
     if let Some(err) = pipeline_error {
         log::error!(
             "postprocess: render pipeline creation failed for {}: {:#}",
-            path.display(),
+            fragment_path.display(),
             err
         );
         return None;
@@ -287,7 +313,7 @@ fn compile_postprocess_shader(
 
     log::info!(
         "postprocess: successfully compiled shader {}",
-        path.display()
+        fragment_path.display()
     );
     Some(pipeline)
 }

@@ -1,7 +1,7 @@
 use config::ImportedShaderPathBuf;
 use std::path::Path;
 
-use crate::termwindow::webgpu::ResolvedShader;
+use crate::termwindow::webgpu::{ResolvedShader, ShaderSource};
 
 /// Errors that can occur during shader import (cross-compilation from
 /// a foreign format to WGSL).
@@ -47,6 +47,9 @@ const GHOSTTY_SHADERTOY_PREFIX: &str = include_str!(concat!(
     env!("OUT_DIR"),
     "/ghostty_shadertoy_prefix_patched.glsl"
 ));
+
+const GHOSTTY_FULLSCREEN_VERTEX: &str =
+    include_str!("shaders/ghostty_fullscreen_vertex.wgsl");
 
 /// Import (cross-compile) a foreign shader to a resolved WGSL shader.
 pub fn import_shader(shader: &ImportedShaderPathBuf) -> Result<ResolvedShader, ShaderImportError> {
@@ -95,7 +98,6 @@ fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
         })?;
 
     replace_globals_struct(&mut module);
-    add_vertex_shader(&mut module);
     rename_entry_point(&mut module);
 
     let mut validator = naga::valid::Validator::new(
@@ -115,7 +117,14 @@ fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
             error: e,
         })?;
 
-    Ok(ResolvedShader::new(wgsl, std::path::PathBuf::from(path_str)))
+    let path = std::path::PathBuf::from(path_str);
+    Ok(ResolvedShader::new(
+        std::sync::Arc::new(ShaderSource::new(
+            GHOSTTY_FULLSCREEN_VERTEX.to_string(),
+            path.clone(),
+        )),
+        std::sync::Arc::new(ShaderSource::new(wgsl, path)),
+    ))
 }
 
 fn compile_glsl_to_spirv(
@@ -246,214 +255,6 @@ fn replace_globals_struct(module: &mut naga::Module) {
     };
 
     module.types.replace(globals_handle, new_struct);
-}
-
-/// Fullscreen triangle vertex shader from `@builtin(vertex_index)`.
-fn add_vertex_shader(module: &mut naga::Module) {
-    let span = naga::Span::default();
-
-    let u32_ty = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Scalar(naga::Scalar::U32),
-        },
-        span,
-    );
-    let i32_ty = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Scalar(naga::Scalar::I32),
-        },
-        span,
-    );
-    let f32_ty = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Scalar(naga::Scalar::F32),
-        },
-        span,
-    );
-    let vec4f = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Vector {
-                size: naga::VectorSize::Quad,
-                scalar: naga::Scalar::F32,
-            },
-        },
-        span,
-    );
-
-    let mut expressions = naga::Arena::new();
-
-    // Pre-emitted expressions don't need Emit statements.
-    let vertex_index_expr = expressions.append(
-        naga::Expression::FunctionArgument(0),
-        span,
-    );
-    let one_u32 = expressions.append(
-        naga::Expression::Literal(naga::Literal::U32(1)),
-        span,
-    );
-    let four_i32 = expressions.append(
-        naga::Expression::Literal(naga::Literal::I32(4)),
-        span,
-    );
-    let one_i32 = expressions.append(
-        naga::Expression::Literal(naga::Literal::I32(1)),
-        span,
-    );
-    let zero_f32 = expressions.append(
-        naga::Expression::Literal(naga::Literal::F32(0.0)),
-        span,
-    );
-    let one_f32 = expressions.append(
-        naga::Expression::Literal(naga::Literal::F32(1.0)),
-        span,
-    );
-
-    let mut emitter = naga::proc::Emitter::default();
-    emitter.start(&expressions);
-
-    let and_expr = expressions.append(
-        naga::Expression::Binary {
-            op: naga::BinaryOperator::And,
-            left: vertex_index_expr,
-            right: one_u32,
-        },
-        span,
-    );
-
-    let and_as_i32 = expressions.append(
-        naga::Expression::As {
-            expr: and_expr,
-            kind: naga::ScalarKind::Sint,
-            convert: Some(4),
-        },
-        span,
-    );
-
-    let mul_x = expressions.append(
-        naga::Expression::Binary {
-            op: naga::BinaryOperator::Multiply,
-            left: and_as_i32,
-            right: four_i32,
-        },
-        span,
-    );
-
-    let sub_x = expressions.append(
-        naga::Expression::Binary {
-            op: naga::BinaryOperator::Subtract,
-            left: mul_x,
-            right: one_i32,
-        },
-        span,
-    );
-
-    let x_expr = expressions.append(
-        naga::Expression::As {
-            expr: sub_x,
-            kind: naga::ScalarKind::Float,
-            convert: Some(4),
-        },
-        span,
-    );
-
-    let shr_expr = expressions.append(
-        naga::Expression::Binary {
-            op: naga::BinaryOperator::ShiftRight,
-            left: vertex_index_expr,
-            right: one_u32,
-        },
-        span,
-    );
-
-    let shr_as_i32 = expressions.append(
-        naga::Expression::As {
-            expr: shr_expr,
-            kind: naga::ScalarKind::Sint,
-            convert: Some(4),
-        },
-        span,
-    );
-
-    let mul_y = expressions.append(
-        naga::Expression::Binary {
-            op: naga::BinaryOperator::Multiply,
-            left: shr_as_i32,
-            right: four_i32,
-        },
-        span,
-    );
-
-    let sub_y = expressions.append(
-        naga::Expression::Binary {
-            op: naga::BinaryOperator::Subtract,
-            left: mul_y,
-            right: one_i32,
-        },
-        span,
-    );
-
-    let y_expr = expressions.append(
-        naga::Expression::As {
-            expr: sub_y,
-            kind: naga::ScalarKind::Float,
-            convert: Some(4),
-        },
-        span,
-    );
-
-    let result_expr = expressions.append(
-        naga::Expression::Compose {
-            ty: vec4f,
-            components: vec![x_expr, y_expr, zero_f32, one_f32],
-        },
-        span,
-    );
-
-    let emit_result = emitter.finish(&expressions);
-
-    let mut body = naga::Block::new();
-    if let Some((stmt, span)) = emit_result {
-        body.push(stmt, span);
-    }
-    body.push(
-        naga::Statement::Return {
-            value: Some(result_expr),
-        },
-        span,
-    );
-
-    let function = naga::Function {
-        name: Some("vs_postprocess".to_string()),
-        arguments: vec![naga::FunctionArgument {
-            name: Some("vertex_index".to_string()),
-            ty: u32_ty,
-            binding: Some(naga::Binding::BuiltIn(naga::BuiltIn::VertexIndex)),
-        }],
-        result: Some(naga::FunctionResult {
-            ty: vec4f,
-            binding: Some(naga::Binding::BuiltIn(naga::BuiltIn::Position {
-                invariant: false,
-            })),
-        }),
-        local_variables: naga::Arena::new(),
-        expressions,
-        named_expressions: naga::FastIndexMap::default(),
-        body,
-        diagnostic_filter_leaf: None,
-    };
-
-    module.entry_points.push(naga::EntryPoint {
-        name: "vs_postprocess".to_string(),
-        stage: naga::ShaderStage::Vertex,
-        early_depth_test: None,
-        workgroup_size: [0; 3],
-        workgroup_size_overrides: None,
-        function,
-    });
 }
 
 fn rename_entry_point(module: &mut naga::Module) {
