@@ -1162,6 +1162,7 @@ impl WebGpuState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use config::{GhosttyPathBuf, ImportedShaderPathBuf};
     use std::path::PathBuf;
 
     #[test]
@@ -1733,6 +1734,239 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         // --- Readback: copy render target to staging buffer ---
         let bytes_per_row_unaligned = tex_width * 4;
         // wgpu requires rows aligned to COPY_BYTES_PER_ROW_ALIGNMENT
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = (bytes_per_row_unaligned + align - 1) / align * align;
+        let buffer_size = (bytes_per_row * tex_height) as u64;
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Test staging buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &render_target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(tex_height),
+                },
+            },
+            wgpu::Extent3d {
+                width: tex_width,
+                height: tex_height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // Map the buffer and read pixels
+        let buffer_slice = staging_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+        device.poll(wgpu::PollType::Wait).expect("GPU poll failed");
+        receiver
+            .recv()
+            .expect("Failed to receive map result")
+            .expect("Buffer mapping failed");
+
+        let data = buffer_slice.get_mapped_range();
+
+        // Check every pixel in the output (accounting for row padding)
+        let tolerance = 2u8;
+        let expected: [u8; 4] = [0, 255, 255, 255]; // cyan = inverted red
+        for row in 0..tex_height {
+            for col in 0..tex_width {
+                let offset = (row * bytes_per_row + col * 4) as usize;
+                let pixel = &data[offset..offset + 4];
+                for (ch, (&got, &exp)) in pixel.iter().zip(expected.iter()).enumerate() {
+                    let diff = (got as i16 - exp as i16).unsigned_abs();
+                    assert!(
+                        diff <= tolerance as u16,
+                        "Pixel ({},{}) channel {}: expected {}, got {} (diff {} > tolerance {})",
+                        col, row, ch, exp, got, diff, tolerance
+                    );
+                }
+            }
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+    }
+
+    #[test]
+    fn test_imported_shader_actually_renders() {
+        let Some((device, queue)) = create_test_device() else {
+            eprintln!("Skipping test_imported_shader_actually_renders: no GPU adapter available");
+            return;
+        };
+
+        let tex_width: u32 = 4;
+        let tex_height: u32 = 4;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+
+        // --- Source texture: solid red ---
+        let source_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Test source texture"),
+            size: wgpu::Extent3d {
+                width: tex_width,
+                height: tex_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let red_pixel: [u8; 4] = [255, 0, 0, 255];
+        let pixel_data: Vec<u8> = red_pixel
+            .iter()
+            .copied()
+            .cycle()
+            .take((tex_width * tex_height * 4) as usize)
+            .collect();
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &source_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixel_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(tex_width * 4),
+                rows_per_image: Some(tex_height),
+            },
+            wgpu::Extent3d {
+                width: tex_width,
+                height: tex_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let source_view = source_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- Render target texture ---
+        let render_target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Test render target"),
+            size: wgpu::Extent3d {
+                width: tex_width,
+                height: tex_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let render_target_view =
+            render_target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- Bind group layouts ---
+        let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
+
+        // --- Sampler ---
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Test sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // --- Texture bind group (group 0) ---
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Test texture bind group"),
+            layout: &texture_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        // --- Uniform buffer + bind group (group 1) ---
+        let uniform = PostProcessUniform::default();
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test uniform buffer"),
+            contents: bytemuck::cast_slice(&[uniform]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Test uniform bind group"),
+            layout: &uniform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // --- Compile the imported color-inversion shader through the full path ---
+        let dir = tempfile::tempdir().unwrap();
+        let shader_path = dir.path().join("negative.glsl");
+        std::fs::write(&shader_path, include_str!("shaders/test_fixtures/negative.glsl")).unwrap();
+
+        let pipeline = {
+            let shader_path = ShaderPathBuf::Imported(ImportedShaderPathBuf::Ghostty(
+                GhosttyPathBuf::new(shader_path),
+            ));
+            let resolved = resolve_shader(&shader_path).unwrap();
+            compile_postprocess_shader(&device, &resolved, format, &texture_bgl, &uniform_bgl)
+                .expect("Imported negative shader should compile")
+        };
+
+        // --- Render pass ---
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Test render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &render_target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&pipeline);
+            rpass.set_bind_group(0, &texture_bind_group, &[]);
+            rpass.set_bind_group(1, &uniform_bind_group, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // --- Readback: copy render target to staging buffer ---
+        let bytes_per_row_unaligned = tex_width * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let bytes_per_row = (bytes_per_row_unaligned + align - 1) / align * align;
         let buffer_size = (bytes_per_row * tex_height) as u64;

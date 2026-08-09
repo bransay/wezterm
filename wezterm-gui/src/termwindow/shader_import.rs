@@ -58,7 +58,6 @@ pub fn import_shader(shader: &ImportedShaderPathBuf) -> Result<ResolvedShader, S
     }
 }
 
-/// GLSL → glslang → SPIR-V → naga IR → WGSL
 fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
     let path_str = path.display().to_string();
 
@@ -67,7 +66,6 @@ fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
         error: e,
     })?;
 
-    // Strip UTF-8 BOM if present
     let source_str = if raw_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         std::str::from_utf8(&raw_bytes[3..]).map_err(|e| ShaderImportError::InvalidUtf8 {
             path: path_str.clone(),
@@ -86,14 +84,21 @@ fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
         });
     }
 
-    let full_source = format!("{}\n{}", GHOSTTY_SHADERTOY_PREFIX, source_str);
+    compile_ghostty(source_str, &path_str)
+}
 
-    let spirv_bytes = compile_glsl_to_spirv(&full_source, &path_str)?;
+fn compile_ghostty(
+    shader_source: &str,
+    source_label: &str,
+) -> Result<ResolvedShader, ShaderImportError> {
+    let full_source = format!("{}\n{}", GHOSTTY_SHADERTOY_PREFIX, shader_source);
+
+    let spirv_bytes = compile_glsl_to_spirv(&full_source, source_label)?;
 
     let spv_options = naga::front::spv::Options::default();
     let mut module = naga::front::spv::parse_u8_slice(&spirv_bytes, &spv_options)
         .map_err(|e| ShaderImportError::SpvParseError {
-            path: path_str.clone(),
+            path: source_label.to_string(),
             error: e,
         })?;
 
@@ -107,17 +112,17 @@ fn import_ghostty(path: &Path) -> Result<ResolvedShader, ShaderImportError> {
     let info = validator
         .validate(&module)
         .map_err(|e| ShaderImportError::ValidationError {
-            path: path_str.clone(),
+            path: source_label.to_string(),
             error: e,
         })?;
 
     let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
         .map_err(|e| ShaderImportError::EmitError {
-            path: path_str.clone(),
+            path: source_label.to_string(),
             error: e,
         })?;
 
-    let path = std::path::PathBuf::from(path_str);
+    let path = std::path::PathBuf::from(source_label);
     Ok(ResolvedShader::new(
         std::sync::Arc::new(ShaderSource::new(
             GHOSTTY_FULLSCREEN_VERTEX.to_string(),
@@ -297,13 +302,47 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = texture(iChannel0, uv);
 }
 "#;
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(temp.path(), glsl.as_bytes()).unwrap();
-        let result = import_ghostty(temp.path());
+        let result = compile_ghostty(glsl, "simple.glsl");
         assert!(
             result.is_ok(),
             "Simple shader should import: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_import_real_crt() {
+        let result = compile_ghostty(include_str!("shaders/test_fixtures/crt.glsl"), "crt.glsl");
+        assert!(result.is_ok(), "crt.glsl should import: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_import_real_bloom() {
+        let result = compile_ghostty(include_str!("shaders/test_fixtures/bloom.glsl"), "bloom.glsl");
+        assert!(result.is_ok(), "bloom.glsl should import: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_import_real_dither() {
+        let result = compile_ghostty(include_str!("shaders/test_fixtures/dither.glsl"), "dither.glsl");
+        assert!(result.is_ok(), "dither.glsl should import: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_import_real_negative() {
+        let result = compile_ghostty(include_str!("shaders/test_fixtures/negative.glsl"), "negative.glsl");
+        assert!(result.is_ok(), "negative.glsl should import: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_import_real_vhs() {
+        let result = compile_ghostty(include_str!("shaders/test_fixtures/vhs.glsl"), "vhs.glsl");
+        assert!(result.is_ok(), "vhs.glsl should import: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_import_real_starfield() {
+        let result = compile_ghostty(include_str!("shaders/test_fixtures/starfield.glsl"), "starfield.glsl");
+        assert!(result.is_ok(), "starfield.glsl should import: {:?}", result.err());
     }
 }

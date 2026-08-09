@@ -26,6 +26,6 @@ Only modify this file on phase completion or plan changes.
 
 - [ ] **Phase 3: Testing & Validation**
   - **Goal:** Validate against real Ghostty shaders and harden error handling.
-  - **Deliverable:** Test against https://github.com/0xhckr/ghostty-shaders (crt.glsl, bettercrt.glsl, bloom.glsl, dither.glsl, etc.); compilation errors logged with graceful fallback; validation at shader load, not in render loop.
+  - **Deliverable:** Vendor 6 shaders from https://github.com/0xhckr/ghostty-shaders (crt.glsl, bloom.glsl, dither.glsl, negative.glsl, vhs.glsl, starfield.glsl) as compile-time test fixtures; `compile_ghostty` split from `import_ghostty` so tests call the cross-compile core directly with `include_str!`'d sources; 6 tests asserting each shader imports end-to-end (glslang→SPIR-V→naga→WGSL). Compilation errors logged with graceful fallback; validation at shader load, not in render loop.
   - **Exit criteria:** Multiple shaders from the ghostty-shaders repo compile and render correctly on WebGpu; malformed shaders degrade gracefully.
   - **Commit:** <SHA filled in on completion>

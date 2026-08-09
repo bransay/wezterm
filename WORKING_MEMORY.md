@@ -72,3 +72,20 @@ Entry shape:
 - **Files:** wezterm-gui/src/termwindow/webgpu.rs (ResolvedShader Arc split, create_module closure, kind-based labels), wezterm-gui/src/termwindow/shader_import.rs (deleted add_vertex_shader, returns ResolvedShader with Arc sources), wezterm-gui/src/termwindow/shaders/ghostty_fullscreen_vertex.wgsl (new)
 - **Refs:** DD-016, DD-017, PLAN.md#phase-2
 - **Next:** Phase 3 — Testing & Validation with real ghostty-shaders repo
+
+## [2026-08-09 11:00] Phase 3: Investigation — capability set vs real shaders
+- **Did:** Design-focused implementation pass. Investigated all 34 shaders in ghostty-shaders repo against the V1 capability set. Key findings: (1) DD-014's vec3→vec2 concern is overstated — only `matrix-hallway.glsl` divides a vec3 by `iResolution` whole (`vec3(fragCoord,1)/iResolution`); all other shaders use `.xy`/`.x`/`.y` only. (2) `glitchy.glsl` is the only shader using `textureLod` (likely the failure cause); `uvec`/`ivec`/bit-ops work fine (dither, drunkard, mnoise, just-snow all import OK). (3) 27/34 import OK; 5 fail on out-of-scope uniforms (cursor/iMouse), 2 fail in-scope (matrix-hallway vec3/iResolution, glitchy textureLod). Selected 6 representative in-scope shaders: crt, bloom, dither, negative, vhs, starfield — covering basic texture, iTime animation, iResolution UV, loops/multi-tap, integer/bit ops, complex noise/hash.
+- **Refs:** PLAN.md#phase-3, DD-001, DD-014
+- **Next:** Implement Phase 3 tests
+
+## [2026-08-09 11:30] Phase 3: Implemented — vendored fixtures + compile_ghostty split
+- **Did:** Implemented Phase 3. (1) Split `import_ghostty` into thin file-reading wrapper + `compile_ghostty(shader_source, path_label)` core — tests call the cross-compile core directly, no tempfile/fs. (2) Vendored 6 shaders (crt, bloom, dither, negative, vhs, starfield) into `wezterm-gui/src/termwindow/shaders/`. (3) Added 6 tests using `include_str!` + `compile_ghostty`, asserting each imports end-to-end. Migrated `test_import_simple_shader` to the new pattern. All 9 shader_import tests pass.
+- **Files:** wezterm-gui/src/termwindow/shader_import.rs (compile_ghostty split, 6 new tests), wezterm-gui/src/termwindow/shaders/{crt,bloom,dither,negative,vhs,starfield}.glsl (new)
+- **Refs:** PLAN.md#phase-3
+- **Next:** Commit Phase 3
+
+## [2026-08-09 12:00] Phase 3: Full-path render test for imported shader
+- **Did:** Closed the gap — the 6 shader_import tests only exercised `compile_ghostty` (cross-compile core), not the real loading path. Added `test_imported_shader_actually_renders` in webgpu.rs mirroring `test_shader_actually_renders`: writes vendored `negative.glsl` to a temp file, routes through `ShaderPathBuf::Imported(Ghostty)` → `resolve_shader` → `import_shader` → `import_ghostty` → `compile_ghostty` → `compile_postprocess_shader` → GPU render, asserts cyan output (inverted red). Added `GhosttyPathBuf`/`ImportedShaderPathBuf` to webgpu.rs imports. All 42 wezterm-gui tests pass.
+- **Files:** wezterm-gui/src/termwindow/webgpu.rs (test_imported_shader_actually_renders, imports)
+- **Refs:** PLAN.md#phase-3
+- **Next:** Commit Phase 3
