@@ -30,6 +30,12 @@ pub struct PostProcessUniform {
     pub time_delta: f32,
     pub frame: u32,
     pub _padding: [u32; 3],
+    pub current_cursor: [f32; 4],
+    pub previous_cursor: [f32; 4],
+    pub current_cursor_color: [f32; 4],
+    pub previous_cursor_color: [f32; 4],
+    pub cursor_change_time: f32,
+    pub _padding_2: [u32; 3],
 }
 
 /// State for the post-processing shader pipeline.
@@ -64,6 +70,14 @@ struct PostProcessUniform {
     _padding_0: u32,
     _padding_1: u32,
     _padding_2: u32,
+    current_cursor: vec4<f32>,
+    previous_cursor: vec4<f32>,
+    current_cursor_color: vec4<f32>,
+    previous_cursor_color: vec4<f32>,
+    cursor_change_time: f32,
+    _padding_3: u32,
+    _padding_4: u32,
+    _padding_5: u32,
 };
 
 struct VertexOutput {
@@ -1169,8 +1183,8 @@ mod tests {
     fn test_postprocess_uniform_layout() {
         assert_eq!(
             std::mem::size_of::<PostProcessUniform>(),
-            32,
-            "PostProcessUniform must be 32 bytes for GPU alignment"
+            112,
+            "PostProcessUniform must be 112 bytes for GPU alignment"
         );
     }
 
@@ -1806,13 +1820,15 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         staging_buffer.unmap();
     }
 
-    #[test]
-    fn test_imported_shader_actually_renders() {
-        let Some((device, queue)) = create_test_device() else {
-            eprintln!("Skipping test_imported_shader_actually_renders: no GPU adapter available");
-            return;
-        };
-
+    /// Render an imported shader through the full path; returns pixel data
+    /// and the padded bytes-per-row.
+    fn render_imported_shader(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shader_source: &str,
+        shader_name: &str,
+        uniform: PostProcessUniform,
+    ) -> (Vec<u8>, usize) {
         let tex_width: u32 = 4;
         let tex_height: u32 = 4;
         let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -1878,11 +1894,10 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let render_target_view =
-            render_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let render_target_view = render_target.create_view(&wgpu::TextureViewDescriptor::default());
 
         // --- Bind group layouts ---
-        let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(&device);
+        let (texture_bgl, uniform_bgl) = create_test_bind_group_layouts(device);
 
         // --- Sampler ---
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1911,7 +1926,6 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
         });
 
         // --- Uniform buffer + bind group (group 1) ---
-        let uniform = PostProcessUniform::default();
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Test uniform buffer"),
             contents: bytemuck::cast_slice(&[uniform]),
@@ -1926,18 +1940,18 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
             }],
         });
 
-        // --- Compile the imported color-inversion shader through the full path ---
+        // --- Compile the imported shader through the full path ---
         let dir = tempfile::tempdir().unwrap();
-        let shader_path = dir.path().join("negative.glsl");
-        std::fs::write(&shader_path, include_str!("shaders/test_fixtures/negative.glsl")).unwrap();
+        let shader_path = dir.path().join(shader_name);
+        std::fs::write(&shader_path, shader_source).unwrap();
 
         let pipeline = {
             let shader_path = ShaderPathBuf::Imported(ImportedShaderPathBuf::Ghostty(
                 GhosttyPathBuf::new(shader_path),
             ));
             let resolved = resolve_shader(&shader_path).unwrap();
-            compile_postprocess_shader(&device, &resolved, format, &texture_bgl, &uniform_bgl)
-                .expect("Imported negative shader should compile")
+            compile_postprocess_shader(device, &resolved, format, &texture_bgl, &uniform_bgl)
+                .expect("Imported shader should compile")
         };
 
         // --- Render pass ---
@@ -2016,13 +2030,35 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
             .expect("Buffer mapping failed");
 
         let data = buffer_slice.get_mapped_range();
+        let result = data.to_vec();
+        drop(data);
+        staging_buffer.unmap();
+        (result, bytes_per_row as usize)
+    }
+
+    #[test]
+    fn test_imported_shader_actually_renders() {
+        let Some((device, queue)) = create_test_device() else {
+            eprintln!("Skipping test_imported_shader_actually_renders: no GPU adapter available");
+            return;
+        };
+
+        let (data, bytes_per_row) = render_imported_shader(
+            &device,
+            &queue,
+            include_str!("shaders/test_fixtures/negative.glsl"),
+            "negative.glsl",
+            PostProcessUniform::default(),
+        );
 
         // Check every pixel in the output (accounting for row padding)
+        let tex_width: u32 = 4;
+        let tex_height: u32 = 4;
         let tolerance = 2u8;
         let expected: [u8; 4] = [0, 255, 255, 255]; // cyan = inverted red
         for row in 0..tex_height {
             for col in 0..tex_width {
-                let offset = (row * bytes_per_row + col * 4) as usize;
+                let offset = (row as usize * bytes_per_row + col as usize * 4) as usize;
                 let pixel = &data[offset..offset + 4];
                 for (ch, (&got, &exp)) in pixel.iter().zip(expected.iter()).enumerate() {
                     let diff = (got as i16 - exp as i16).unsigned_abs();
@@ -2034,8 +2070,55 @@ fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
         }
+    }
 
-        drop(data);
-        staging_buffer.unmap();
+    #[test]
+    fn test_imported_cursor_shader_renders() {
+        let Some((device, queue)) = create_test_device() else {
+            eprintln!("Skipping test_imported_cursor_shader_renders: no GPU adapter available");
+            return;
+        };
+
+        let uniform = PostProcessUniform {
+            resolution: [4.0, 4.0],
+            time: 0.1,
+            time_delta: 0.016,
+            frame: 1,
+            _padding: [0; 3],
+            current_cursor: [1.0, 1.0, 2.0, 2.0],
+            previous_cursor: [0.0, 0.0, 2.0, 2.0],
+            current_cursor_color: [1.0, 0.0, 0.0, 1.0],
+            previous_cursor_color: [1.0, 0.0, 0.0, 1.0],
+            cursor_change_time: 0.0,
+            _padding_2: [0; 3],
+        };
+
+        let (data, bytes_per_row) = render_imported_shader(
+            &device,
+            &queue,
+            include_str!("shaders/test_fixtures/cursor_lightning.glsl"),
+            "cursor_lightning.glsl",
+            uniform,
+        );
+
+        // The cursor shader should render without crashing and produce a
+        // non-black output (the cursor trail/bolt is drawn over the red
+        // terminal texture). Assert at least one pixel differs from black.
+        let tex_width: u32 = 4;
+        let tex_height: u32 = 4;
+        let mut any_non_black = false;
+        for row in 0..tex_height {
+            for col in 0..tex_width {
+                let offset = (row as usize * bytes_per_row + col as usize * 4) as usize;
+                let pixel = &data[offset..offset + 4];
+                if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                    any_non_black = true;
+                }
+            }
+        }
+        assert!(
+            any_non_black,
+            "Cursor shader should produce non-black output"
+        );
     }
 }

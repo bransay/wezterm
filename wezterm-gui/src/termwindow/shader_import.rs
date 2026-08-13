@@ -182,7 +182,7 @@ fn compile_glsl_to_spirv(
         })
 }
 
-/// Replace the Globals uniform block with a 4-member struct matching
+/// Replace the Globals uniform block with a struct matching
 /// wezterm's `PostProcessUniform` layout.
 fn replace_globals_struct(module: &mut naga::Module) {
     let globals_handle = module
@@ -206,6 +206,16 @@ fn replace_globals_struct(module: &mut naga::Module) {
             name: None,
             inner: naga::TypeInner::Vector {
                 size: naga::VectorSize::Bi,
+                scalar: f32_scalar,
+            },
+        },
+        naga::Span::default(),
+    );
+    let vec4f = module.types.insert(
+        naga::Type {
+            name: None,
+            inner: naga::TypeInner::Vector {
+                size: naga::VectorSize::Quad,
                 scalar: f32_scalar,
             },
         },
@@ -254,12 +264,137 @@ fn replace_globals_struct(module: &mut naga::Module) {
                     binding: None,
                     offset: 16,
                 },
+                naga::StructMember {
+                    name: Some("iCurrentCursor".to_string()),
+                    ty: vec4f,
+                    binding: None,
+                    offset: 32,
+                },
+                naga::StructMember {
+                    name: Some("iPreviousCursor".to_string()),
+                    ty: vec4f,
+                    binding: None,
+                    offset: 48,
+                },
+                naga::StructMember {
+                    name: Some("iCurrentCursorColor".to_string()),
+                    ty: vec4f,
+                    binding: None,
+                    offset: 64,
+                },
+                naga::StructMember {
+                    name: Some("iPreviousCursorColor".to_string()),
+                    ty: vec4f,
+                    binding: None,
+                    offset: 80,
+                },
+                naga::StructMember {
+                    name: Some("iTimeCursorChange".to_string()),
+                    ty: f32_ty,
+                    binding: None,
+                    offset: 96,
+                },
             ],
-            span: 32,
+            span: 112,
         },
     };
 
     module.types.replace(globals_handle, new_struct);
+
+    remap_globals_access_indices(module);
+}
+
+/// naga tracks struct member access by index, not name. The SPIR-V Globals
+/// struct has 27 members; our replacement has 9. Remap `AccessIndex`
+/// expressions that index into the Globals global from the old member
+/// indices to the new ones.
+fn remap_globals_access_indices(module: &mut naga::Module) {
+    // Find the Globals global variable. The variable itself has an empty
+    // name; identify it by its type being the Globals struct.
+    let globals_ty = module
+        .types
+        .iter()
+        .find(|(_, ty)| {
+            ty.name.as_deref() == Some("Globals")
+                && matches!(ty.inner, naga::TypeInner::Struct { .. })
+        })
+        .map(|(handle, _)| handle);
+
+    let Some(globals_ty) = globals_ty else {
+        return;
+    };
+
+    let globals_var = module
+        .global_variables
+        .iter()
+        .find(|(_, var)| var.ty == globals_ty)
+        .map(|(handle, _)| handle);
+
+    let Some(globals_var) = globals_var else {
+        return;
+    };
+
+    // Old member index -> new member index.
+    let remap = |old: u32| -> Option<u32> {
+        Some(match old {
+            0 => 0,  // iResolution
+            1 => 1,  // iTime
+            2 => 2,  // iTimeDelta
+            4 => 3,  // iFrame
+            10 => 4, // iCurrentCursor
+            11 => 5, // iPreviousCursor
+            12 => 6, // iCurrentCursorColor
+            13 => 7, // iPreviousCursorColor
+            17 => 8, // iTimeCursorChange
+            _ => return None,
+        })
+    };
+
+    // Find the GlobalVariable expression that references the Globals global.
+    // It may live in the module's global_expressions or in a function's
+    // expressions arena.
+    let globals_expr = module
+        .global_expressions
+        .iter()
+        .find(|(_, expr)| {
+            matches!(
+                expr,
+                naga::Expression::GlobalVariable(h) if *h == globals_var
+            )
+        })
+        .map(|(handle, _)| handle)
+        .or_else(|| {
+            module.functions.iter().find_map(|(_, function)| {
+                function
+                    .expressions
+                    .iter()
+                    .find(|(_, expr)| {
+                        matches!(
+                            expr,
+                            naga::Expression::GlobalVariable(h) if *h == globals_var
+                        )
+                    })
+                    .map(|(handle, _)| handle)
+            })
+        });
+
+    let Some(globals_expr) = globals_expr else {
+        return;
+    };
+
+    // Remap AccessIndex expressions in every function whose base is the
+    // Globals global expression.
+    for function in module.functions.iter_mut() {
+        for (_, expr) in function.1.expressions.iter_mut() {
+            if let naga::Expression::AccessIndex { base, index } = expr {
+                if *base == globals_expr {
+                    if let Some(new_index) = remap(*index) {
+                        *index = new_index;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn rename_entry_point(module: &mut naga::Module) {
@@ -344,5 +479,65 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fn test_import_real_starfield() {
         let result = compile_ghostty(include_str!("shaders/test_fixtures/starfield.glsl"), "starfield.glsl");
         assert!(result.is_ok(), "starfield.glsl should import: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_import_cursor_uniforms() {
+        let glsl = r#"
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord / iResolution.xy;
+    vec4 terminal = texture(iChannel0, uv);
+    vec2 currentCenter = iCurrentCursor.xy + vec2(iCurrentCursor.z * 0.5, -iCurrentCursor.w * 0.5);
+    vec2 previousCenter = iPreviousCursor.xy + vec2(iPreviousCursor.z * 0.5, -iPreviousCursor.w * 0.5);
+    float age = clamp((iTime - iTimeCursorChange) / 0.14, 0.0, 1.0);
+    vec3 color = mix(iCurrentCursorColor.rgb, iPreviousCursorColor.rgb, age);
+    fragColor = vec4(mix(terminal.rgb, color, age), terminal.a);
+}
+"#;
+        let result = compile_ghostty(glsl, "cursor.glsl");
+        assert!(
+            result.is_ok(),
+            "Cursor-uniform shader should import: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_import_real_cursor_blaze() {
+        let result = compile_ghostty(
+            include_str!("shaders/test_fixtures/cursor_blaze.glsl"),
+            "cursor_blaze.glsl",
+        );
+        assert!(
+            result.is_ok(),
+            "cursor_blaze.glsl should import: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_import_real_cursor_lightning() {
+        let result = compile_ghostty(
+            include_str!("shaders/test_fixtures/cursor_lightning.glsl"),
+            "cursor_lightning.glsl",
+        );
+        assert!(
+            result.is_ok(),
+            "cursor_lightning.glsl should import: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_import_real_in_game_crt_cursor() {
+        let result = compile_ghostty(
+            include_str!("shaders/test_fixtures/in-game-crt-cursor.glsl"),
+            "in-game-crt-cursor.glsl",
+        );
+        assert!(
+            result.is_ok(),
+            "in-game-crt-cursor.glsl should import: {:?}",
+            result.err()
+        );
     }
 }
