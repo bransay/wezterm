@@ -125,3 +125,9 @@ Entry shape:
 - **Files:** wezterm-shader-types/src/lib.rs (new), wezterm-shader-codegen/src/lib.rs (new), wezterm-gui/src/termwindow/webgpu.rs (annotations + preamble split), wezterm-gui/src/termwindow/shader_import.rs (deleted IR surgery, added renderers), wezterm-gui/src/termwindow/shaders/ghostty_shadertoy_prefix.patch (rewritten), wezterm-gui/src/termwindow/render/pane.rs (Y-flip revert)
 - **Refs:** PLAN.md#phase-5
 - **Next:** Visual test with cursor_blaze.glsl; commit Phase 5 (pending Bryan's go-ahead)
+
+## [2026-08-14 07:00] Phase 5: Visual test + review cleanup
+- **Did:** Visual test with `cursor_blaze.glsl` — trail tracks cursor correctly, Y-flip now in `populate_globals()`. Review cleanup: trimmed verbose doc comments on `GHOSTTY_SHADERTOY_PREFIX`, `POSTPROCESS_PREAMBLE_TAIL`, and codegen derive; removed hardcoded variant validation in codegen (let compiler error on unknown `UniformType` variant); fixed stale `#[ignore]` → `#[uniform_ignore]` in codegen doc. All 47 tests pass after cleanup.
+- **Files:** wezterm-gui/src/termwindow/shader_import.rs, wezterm-gui/src/termwindow/webgpu.rs, wezterm-shader-codegen/src/lib.rs, wezterm-shader-codegen/Cargo.toml (description)
+- **Refs:** PLAN.md#phase-5, DD-024
+- **Next:** Phase 5 committed
