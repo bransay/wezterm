@@ -5,6 +5,8 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+use wezterm_shader_codegen::UniformBuffer;
+use wezterm_shader_types::{UniformField, UniformType};
 use window::bitmaps::Texture2d;
 use window::raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -23,18 +25,29 @@ pub struct ShaderUniform {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Default, Debug, bytemuck::Pod, bytemuck::Zeroable, UniformBuffer)]
 pub struct PostProcessUniform {
+    #[uniform_type(Vec2)]
     pub resolution: [f32; 2],
+    #[uniform_type(Float)]
     pub time: f32,
+    #[uniform_type(Float)]
     pub time_delta: f32,
+    #[uniform_type(UInt)]
     pub frame: u32,
+    #[uniform_ignore]
     pub _padding: [u32; 3],
+    #[uniform_type(Vec4)]
     pub current_cursor: [f32; 4],
+    #[uniform_type(Vec4)]
     pub previous_cursor: [f32; 4],
+    #[uniform_type(Vec4)]
     pub current_cursor_color: [f32; 4],
+    #[uniform_type(Vec4)]
     pub previous_cursor_color: [f32; 4],
+    #[uniform_type(Float)]
     pub cursor_change_time: f32,
+    #[uniform_ignore]
     pub _padding_2: [u32; 3],
 }
 
@@ -59,27 +72,9 @@ pub struct PostProcessState {
     pub format: wgpu::TextureFormat,
 }
 
-/// The preamble from postprocess.wgsl minus the default fs_postprocess function.
-/// User shaders only need to provide `fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32>`.
-const POSTPROCESS_PREAMBLE: &str = "\
-struct PostProcessUniform {
-    resolution: vec2<f32>,
-    time: f32,
-    time_delta: f32,
-    frame: u32,
-    _padding_0: u32,
-    _padding_1: u32,
-    _padding_2: u32,
-    current_cursor: vec4<f32>,
-    previous_cursor: vec4<f32>,
-    current_cursor_color: vec4<f32>,
-    previous_cursor_color: vec4<f32>,
-    cursor_change_time: f32,
-    _padding_3: u32,
-    _padding_4: u32,
-    _padding_5: u32,
-};
-
+/// Static post-process preamble tail. The `PostProcessUniform` struct
+/// declaration is rendered from `UNIFORM_FIELDS` and prepended.
+const POSTPROCESS_PREAMBLE_TAIL: &str = "\
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -101,6 +96,41 @@ fn vs_postprocess(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 }
 
 ";
+
+fn uniform_type_wgsl(ty: UniformType) -> &'static str {
+    match ty {
+        UniformType::Vec2 => "vec2<f32>",
+        UniformType::Float => "f32",
+        UniformType::UInt => "u32",
+        UniformType::Vec4 => "vec4<f32>",
+    }
+}
+
+/// Render the `PostProcessUniform` WGSL struct declaration from the
+/// reflected field list.
+fn render_wgsl_uniform_struct(fields: &[UniformField]) -> String {
+    let mut out = String::from("struct PostProcessUniform {\n");
+    for field in fields {
+        out.push_str(&format!(
+            "    {}: {},\n",
+            field.name,
+            uniform_type_wgsl(field.ty)
+        ));
+    }
+    out.push_str("};\n");
+    out
+}
+
+/// The full post-process preamble: rendered uniform struct + static tail.
+/// Rendered once and cached.
+fn postprocess_preamble() -> &'static str {
+    static PREAMBLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREAMBLE.get_or_init(|| {
+        let mut preamble = render_wgsl_uniform_struct(UNIFORM_FIELDS);
+        preamble.push_str(POSTPROCESS_PREAMBLE_TAIL);
+        preamble
+    })
+}
 
 /// A single shader stage's WGSL source and a path label for diagnostics.
 pub struct ShaderSource {
@@ -219,7 +249,7 @@ pub(crate) fn prepare_shader_source(raw_bytes: &[u8], path: &Path) -> Option<Str
 
     // Prepend the standard preamble (structs, bindings, vertex shader)
     // so user only needs to define fs_postprocess
-    Some(format!("{}{}", POSTPROCESS_PREAMBLE, source_str))
+    Some(format!("{}{}", postprocess_preamble(), source_str))
 }
 
 /// Compile a single post-process shader from a resolved WGSL shader.
@@ -1193,7 +1223,7 @@ mod tests {
         // Parse the preamble + a minimal valid fragment shader
         let source = format!(
             "{}\n{}",
-            POSTPROCESS_PREAMBLE,
+            postprocess_preamble(),
             r#"
 @fragment
 fn fs_postprocess(in: VertexOutput) -> @location(0) vec4<f32> {

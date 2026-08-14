@@ -1,5 +1,6 @@
 use config::ImportedShaderPathBuf;
 use std::path::Path;
+use wezterm_shader_types::{UniformField, UniformType};
 
 use crate::termwindow::webgpu::{ResolvedShader, ShaderSource};
 
@@ -41,12 +42,50 @@ pub enum ShaderImportError {
     },
 }
 
-/// Patched shadertoy prefix, generated at build time from the verbatim
-/// ghostty source + `ghostty_shadertoy_prefix.patch`.
+/// Patched ghostty prefix with a `{{UNIFORM_BLOCK}}` placeholder, rendered
+/// at runtime from the reflected `UNIFORM_FIELDS` and cached.
 const GHOSTTY_SHADERTOY_PREFIX: &str = include_str!(concat!(
     env!("OUT_DIR"),
     "/ghostty_shadertoy_prefix_patched.glsl"
 ));
+
+fn uniform_type_glsl(ty: UniformType) -> &'static str {
+    match ty {
+        UniformType::Vec2 => "vec2",
+        UniformType::Float => "float",
+        UniformType::UInt => "uint",
+        UniformType::Vec4 => "vec4",
+    }
+}
+
+/// Render the wezterm uniform block GLSL declaration from the reflected
+/// field list.
+fn render_glsl_uniform_block(fields: &[UniformField]) -> String {
+    let mut out = String::from(
+        "layout(set = 1, binding = 0, std140) uniform PostProcessUniform {\n",
+    );
+    for field in fields {
+        out.push_str(&format!(
+            "    {} {};\n",
+            uniform_type_glsl(field.ty),
+            field.name
+        ));
+    }
+    out.push_str("};\n");
+    out
+}
+
+/// The full ghostty shader prefix: patched template with the uniform block
+/// rendered in. Rendered once and cached.
+fn ghostty_prefix() -> &'static str {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREFIX.get_or_init(|| {
+        GHOSTTY_SHADERTOY_PREFIX.replace(
+            "{{UNIFORM_BLOCK}}",
+            &render_glsl_uniform_block(crate::termwindow::webgpu::UNIFORM_FIELDS),
+        )
+    })
+}
 
 const GHOSTTY_FULLSCREEN_VERTEX: &str =
     include_str!("shaders/ghostty_fullscreen_vertex.wgsl");
@@ -91,7 +130,7 @@ fn compile_ghostty(
     shader_source: &str,
     source_label: &str,
 ) -> Result<ResolvedShader, ShaderImportError> {
-    let full_source = format!("{}\n{}", GHOSTTY_SHADERTOY_PREFIX, shader_source);
+    let full_source = format!("{}\n{}", ghostty_prefix(), shader_source);
 
     let spirv_bytes = compile_glsl_to_spirv(&full_source, source_label)?;
 
@@ -102,7 +141,6 @@ fn compile_ghostty(
             error: e,
         })?;
 
-    replace_globals_struct(&mut module);
     rename_entry_point(&mut module);
 
     let mut validator = naga::valid::Validator::new(
@@ -182,220 +220,6 @@ fn compile_glsl_to_spirv(
         })
 }
 
-/// Replace the Globals uniform block with a struct matching
-/// wezterm's `PostProcessUniform` layout.
-fn replace_globals_struct(module: &mut naga::Module) {
-    let globals_handle = module
-        .types
-        .iter()
-        .find(|(_, ty)| {
-            ty.name.as_deref() == Some("Globals")
-                && matches!(ty.inner, naga::TypeInner::Struct { .. })
-        })
-        .map(|(handle, _)| handle);
-
-    let Some(globals_handle) = globals_handle else {
-        return;
-    };
-
-    let f32_scalar = naga::Scalar::F32;
-    let i32_scalar = naga::Scalar::I32;
-
-    let vec2f = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Vector {
-                size: naga::VectorSize::Bi,
-                scalar: f32_scalar,
-            },
-        },
-        naga::Span::default(),
-    );
-    let vec4f = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Vector {
-                size: naga::VectorSize::Quad,
-                scalar: f32_scalar,
-            },
-        },
-        naga::Span::default(),
-    );
-    let f32_ty = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Scalar(f32_scalar),
-        },
-        naga::Span::default(),
-    );
-    let i32_ty = module.types.insert(
-        naga::Type {
-            name: None,
-            inner: naga::TypeInner::Scalar(i32_scalar),
-        },
-        naga::Span::default(),
-    );
-
-    let new_struct = naga::Type {
-        name: Some("Globals".to_string()),
-        inner: naga::TypeInner::Struct {
-            members: vec![
-                naga::StructMember {
-                    name: Some("iResolution".to_string()),
-                    ty: vec2f,
-                    binding: None,
-                    offset: 0,
-                },
-                naga::StructMember {
-                    name: Some("iTime".to_string()),
-                    ty: f32_ty,
-                    binding: None,
-                    offset: 8,
-                },
-                naga::StructMember {
-                    name: Some("iTimeDelta".to_string()),
-                    ty: f32_ty,
-                    binding: None,
-                    offset: 12,
-                },
-                naga::StructMember {
-                    name: Some("iFrame".to_string()),
-                    ty: i32_ty,
-                    binding: None,
-                    offset: 16,
-                },
-                naga::StructMember {
-                    name: Some("iCurrentCursor".to_string()),
-                    ty: vec4f,
-                    binding: None,
-                    offset: 32,
-                },
-                naga::StructMember {
-                    name: Some("iPreviousCursor".to_string()),
-                    ty: vec4f,
-                    binding: None,
-                    offset: 48,
-                },
-                naga::StructMember {
-                    name: Some("iCurrentCursorColor".to_string()),
-                    ty: vec4f,
-                    binding: None,
-                    offset: 64,
-                },
-                naga::StructMember {
-                    name: Some("iPreviousCursorColor".to_string()),
-                    ty: vec4f,
-                    binding: None,
-                    offset: 80,
-                },
-                naga::StructMember {
-                    name: Some("iTimeCursorChange".to_string()),
-                    ty: f32_ty,
-                    binding: None,
-                    offset: 96,
-                },
-            ],
-            span: 112,
-        },
-    };
-
-    module.types.replace(globals_handle, new_struct);
-
-    remap_globals_access_indices(module);
-}
-
-/// naga tracks struct member access by index, not name. The SPIR-V Globals
-/// struct has 27 members; our replacement has 9. Remap `AccessIndex`
-/// expressions that index into the Globals global from the old member
-/// indices to the new ones.
-fn remap_globals_access_indices(module: &mut naga::Module) {
-    // Find the Globals global variable. The variable itself has an empty
-    // name; identify it by its type being the Globals struct.
-    let globals_ty = module
-        .types
-        .iter()
-        .find(|(_, ty)| {
-            ty.name.as_deref() == Some("Globals")
-                && matches!(ty.inner, naga::TypeInner::Struct { .. })
-        })
-        .map(|(handle, _)| handle);
-
-    let Some(globals_ty) = globals_ty else {
-        return;
-    };
-
-    let globals_var = module
-        .global_variables
-        .iter()
-        .find(|(_, var)| var.ty == globals_ty)
-        .map(|(handle, _)| handle);
-
-    let Some(globals_var) = globals_var else {
-        return;
-    };
-
-    // Old member index -> new member index.
-    let remap = |old: u32| -> Option<u32> {
-        Some(match old {
-            0 => 0,  // iResolution
-            1 => 1,  // iTime
-            2 => 2,  // iTimeDelta
-            4 => 3,  // iFrame
-            10 => 4, // iCurrentCursor
-            11 => 5, // iPreviousCursor
-            12 => 6, // iCurrentCursorColor
-            13 => 7, // iPreviousCursorColor
-            17 => 8, // iTimeCursorChange
-            _ => return None,
-        })
-    };
-
-    // Find the GlobalVariable expression that references the Globals global.
-    // It may live in the module's global_expressions or in a function's
-    // expressions arena.
-    let globals_expr = module
-        .global_expressions
-        .iter()
-        .find(|(_, expr)| {
-            matches!(
-                expr,
-                naga::Expression::GlobalVariable(h) if *h == globals_var
-            )
-        })
-        .map(|(handle, _)| handle)
-        .or_else(|| {
-            module.functions.iter().find_map(|(_, function)| {
-                function
-                    .expressions
-                    .iter()
-                    .find(|(_, expr)| {
-                        matches!(
-                            expr,
-                            naga::Expression::GlobalVariable(h) if *h == globals_var
-                        )
-                    })
-                    .map(|(handle, _)| handle)
-            })
-        });
-
-    let Some(globals_expr) = globals_expr else {
-        return;
-    };
-
-    // Remap AccessIndex expressions in every function whose base is the
-    // Globals global expression.
-    for function in module.functions.iter_mut() {
-        for (_, expr) in function.1.expressions.iter_mut() {
-            if let naga::Expression::AccessIndex { base, index } = expr {
-                if *base == globals_expr {
-                    if let Some(new_index) = remap(*index) {
-                        *index = new_index;
-                    }
-                }
-            }
-        }
-    }
-}
 
 fn rename_entry_point(module: &mut naga::Module) {
     for ep in module.entry_points.iter_mut() {

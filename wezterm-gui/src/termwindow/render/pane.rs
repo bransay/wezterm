@@ -112,7 +112,7 @@ impl crate::TermWindow {
                 let r = self.cursor_pixel_rect(pos);
                 Some([
                     r.origin.x as f32,
-                    (r.origin.y + r.size.height) as f32,
+                    r.origin.y as f32,
                     r.size.width as f32,
                     r.size.height as f32,
                 ])
