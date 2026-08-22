@@ -13,3 +13,9 @@ Entry shape:
 - **Refs:** <PLAN.md#phase-N, DD-NNN>
 - **Next:** <optional breadcrumb>
 -->
+
+## [2026-08-22 ~14:00] Phase 1: Design investigation & planning
+- **Did:** Investigated wezterm codebase idioms for feature-gated backend dispatch. Found `wezterm-ssh` uses cfg-gated enum variants (mutually exclusive backends) and dhat uses inline `#[cfg(feature)]` statements (additive optional instrumentation). Determined our case is additive (metrics + Tracy simultaneously), not mutually exclusive. Confirmed `tracy_client` API: `span!` for zones, `plot!` for values (no separate counter primitive — counters map to plots). Designed `ZoneBackend` trait with per-backend structs + tuple composition. Designed two-arm `profile_zone!` macro (fire-and-forget + bind). Recorded DD-003 (trait dispatch), DD-004 (two-arm macro). Updated PLAN.md phases.
+- **Files:** wezterm-ssh/src/sessionwrap.rs, wezterm-ssh/src/filewrap.rs, wezterm-gui/Cargo.toml, wezterm-gui/src/main.rs:830, Cargo.toml:140
+- **Refs:** PLAN.md#phase-1, DD-003, DD-004
+- **Next:** Implement Phase 1 — create `wezterm-profiling` crate skeleton (trait, MetricsZone, macro)
