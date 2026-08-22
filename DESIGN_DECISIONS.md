@@ -114,3 +114,35 @@ Entry shape:
   - Land a label-less recorder now — rejected: would force rework when labels are needed at migration.
   - Design the full label-threaded recorder now — rejected: the design questions (DD-007) ballooned with no immediate consumer.
 - **Consequences:** Phase 2 is effectively empty of new work; the crate is zones-only. The next real work is Phase 3 (migrate the 13 duration sites). The recorder design must be revisited fresh before Phase 4, informed by DD-006/DD-007.
+
+## DD-011: Value/counter migration (Phase 4) cut from scope
+- **Date:** 2026-08-22
+- **Phase:** Phase 4
+- **Status:** Accepted
+  - **Context:** Phase 4 (migrate the 26 value/counter sites) depends on the recorder design that DD-008 already deferred. The value/counter markers don't serve the Tracy zone timeline — they're point-in-time scalar samples and accumulating counts, not temporal regions. The whole point of the effort is frame-level spike analysis (DD-002), which zones deliver. Values/counters are secondary.
+  - **Decision:** Cut Phase 4 from scope, same YAGNI reasoning as DD-008. The crate stays zones-only. Values/counters keep their raw `metrics::histogram!`/`metrics::counter!` calls as-is.
+  - **Rationale:** Designing and migrating a recorder for 26 sites that don't serve the spike-analysis goal is speculative work. If a concrete need arrives (e.g. Tracy plots become desirable), the deferred DD-006/DD-007/DD-008 design can be picked up then, informed by real sites.
+  - **Consequences:** Phase 4 is empty. Next real work is Phase 5 (Tracy backend). The recorder design (DD-007) stays on the shelf.
+
+## DD-009: No inherent `elapsed` on `MetricsZone`; trait import at call sites
+- **Date:** 2026-08-22
+- **Phase:** Phase 3
+- **Status:** Accepted
+- **Context:** During the zone migration, bind-arm sites that call `_zone.elapsed()` failed to compile because `elapsed` is a trait method and `ProfilingZoneBackend` wasn't in scope at the consumer. Two fixes were on the table: add `use wezterm_profiling::ProfilingZoneBackend;` at each consumer file, or add an inherent `elapsed` on `MetricsZone` (inherent methods win over trait methods in name resolution, so no import needed).
+- **Decision:** No inherent method. Add the trait import at the 4 consumer files that call `.elapsed()` (parser.rs, render/mod.rs, render/pane.rs, render/paint.rs). The trait's `elapsed` is the single implementation; the tuple `(A,B)` impl delegates to it.
+- **Rationale:** An inherent `elapsed` would duplicate the trait method purely to dodge a one-line import. The trait's `elapsed` default (`Duration::ZERO`) would become dead for `MetricsZone`, and two bodies would need to stay in sync. Importing a trait to call its methods is the idiomatic Rust pattern — every trait method works this way. The one-line `use` is the honest price of the trait-based design (DD-003). Fully-qualified call syntax (`<T as Trait>::method(&v)`) could also avoid the import but reads terribly at hand-written call sites and was rejected for readability.
+- **Alternatives considered:**
+  - Inherent `elapsed` on `MetricsZone` — initially added, then **reversed** as redundant duplication.
+  - Fully-qualified `<ProfilingZone as ProfilingZoneBackend>::elapsed(&_zone)` at call sites — works without import but verbose and unreadable; suitable for macro expansions (see DD-010), not hand-written code.
+- **Consequences:** Consumer files calling `.elapsed()` carry a one-line trait import. The macro path is exempt (DD-010). The trait remains the single source of truth for `elapsed`.
+
+## DD-010: Macro uses fully-qualified trait syntax to avoid consumer import
+- **Date:** 2026-08-22
+- **Phase:** Phase 3
+- **Status:** Accepted
+- **Context:** The `profile_zone!` macro expands to a `begin` call. `begin` is a trait method, so a plain `ProfilingZone::begin(name)` in the expansion would require every consumer of the macro to import `ProfilingZoneBackend` — a poor ergonomics tax for a macro that's meant to be a one-liner.
+- **Decision:** The macro emits `<$crate::ProfilingZone as $crate::ProfilingZoneBackend>::begin($name)` — fully-qualified syntax naming both the type and the trait via `$crate`-relative paths. Consumers need no trait import to use the macro.
+- **Rationale:** Macro hygiene means the macro can't assume the trait is in scope at the expansion site. Fully-qualified syntax is the standard Rust solution and is readable enough inside a macro body (unlike at hand-written call sites, per DD-009). The `$crate` prefix ensures the paths resolve regardless of the consumer's module.
+- **Alternatives considered:**
+  - Plain `ProfilingZone::begin(name)` and require the import — rejected: ergonomic tax on every consumer for a macro meant to be trivial to call.
+- **Consequences:** The macro is self-contained (no consumer import for `begin`). The `.elapsed()` method calls at bind-arm sites still need the import (DD-009) — that's unavoidable for method-call syntax and accepted as the idiomatic price.

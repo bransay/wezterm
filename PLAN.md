@@ -23,17 +23,16 @@ Only modify this file on phase completion or plan changes.
   - **Status:** Cut from current scope after design investigation (see DD-006, DD-008). The recorder and the label question (rpc/pdu per-method granularity) are deferred until the value/counter migration phase. Revisit before Phase 4. The crate is zones-only for now.
   - **Commit:** —
 
-- [ ] **Phase 3: Migrate the 13 duration marker sites**
+- [x] **Phase 3: Migrate the 13 duration marker sites**
   - **Goal:** Replace every `let start = Instant::now(); ... metrics::histogram!("name").record(start.elapsed())` with `profile_zone!("name")` across all 13 duration sites.
   - **Deliverable:** All duration sites routed through the abstraction.
   - **Exit criteria:** Histograms record identical data before/after (diff stderr dumps). No `metrics::histogram!().record(start.elapsed())` patterns remain in the codebase.
-  - **Commit:** <SHA filled in on completion>
+  - **Commit:** `6a8d334ea`
 
-- [ ] **Phase 4: Migrate the 26 value/counter marker sites**
+- [ ] **Phase 4: Migrate the 26 value/counter marker sites — DEFERRED**
   - **Goal:** Replace `metrics::histogram!().record(value)` and `metrics::counter!().increment(n)` with `profile_value!`/`profile_counter!`.
-  - **Deliverable:** All value/counter sites routed through the abstraction.
-  - **Exit criteria:** Value/counter data identical before/after. No raw `metrics::histogram!`/`metrics::counter!` timing/value calls remain.
-  - **Commit:** <SHA filled in on completion>
+  - **Status:** Cut from current scope (same YAGNI as Phase 2 / DD-008). The value/counter recorder and label question are deferred. The crate is zones-only; zones are the point of the effort (frame-level spike analysis). Values/counters are secondary and don't serve the Tracy zone timeline. Revisit only if a concrete need arrives.
+  - **Commit:** —
 
 - [ ] **Phase 5: Add Tracy backend**
   - **Goal:** Add `tracy_client` as an optional dep behind a `tracy` feature flag. Guard dual-emits: metrics always, Tracy when feature enabled. Wire the feature into `wezterm-gui/Cargo.toml`.
