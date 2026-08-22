@@ -93,7 +93,7 @@ impl Atlas {
         let reserve_width = reserve_width + padding.unwrap_or(0) as i32 + PADDING * 2;
         let reserve_height = reserve_height + padding.unwrap_or(0) as i32 + PADDING * 2;
 
-        let start = std::time::Instant::now();
+        wezterm_profiling::profile_zone!("window.atlas.allocate.latency");
         let res = if let Some(allocation) = self
             .allocator
             .allocate(AtlasSize::new(reserve_width, reserve_height))
@@ -121,7 +121,6 @@ impl Atlas {
                 current_size: self.side,
             })
         };
-        metrics::histogram!("window.atlas.allocate.latency").record(start.elapsed());
 
         res
     }

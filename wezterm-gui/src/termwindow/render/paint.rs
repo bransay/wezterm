@@ -5,6 +5,7 @@ use anyhow::Context;
 use smol::Timer;
 use std::time::{Duration, Instant};
 use wezterm_font::ClearShapeCache;
+use wezterm_profiling::ProfilingZoneBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllowImage {
@@ -23,6 +24,7 @@ impl crate::TermWindow {
         self.allow_images = AllowImage::Yes;
 
         let start = Instant::now();
+        wezterm_profiling::profile_zone!("gui.paint.impl", _paint_zone);
 
         {
             let diff = start.duration_since(self.last_fps_check_time);
@@ -112,7 +114,7 @@ impl crate::TermWindow {
             self.last_frame_duration,
             self.fps
         );
-        metrics::histogram!("gui.paint.impl").record(self.last_frame_duration);
+        drop(_paint_zone);
         metrics::histogram!("gui.paint.impl.rate").record(1.);
 
         // If self.has_animation is some, then the last render detected
@@ -177,14 +179,14 @@ impl crate::TermWindow {
         let window_is_transparent =
             !self.window_background.is_empty() || self.config.window_background_opacity != 1.0;
 
-        let start = Instant::now();
+        wezterm_profiling::profile_zone!("quad.map", _quad_zone);
         let gl_state = self.render_state.as_ref().unwrap();
         let layer = gl_state
             .layer_for_zindex(0)
             .context("layer_for_zindex(0)")?;
         let mut layers = layer.quad_allocator();
-        log::trace!("quad map elapsed {:?}", start.elapsed());
-        metrics::histogram!("quad.map").record(start.elapsed());
+        log::trace!("quad map elapsed {:?}", _quad_zone.elapsed());
+        drop(_quad_zone);
 
         let mut paint_terminal_background = false;
 

@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
+
 use termwiz::escape::csi::{DecPrivateMode, DecPrivateModeCode, Device, Mode};
 use termwiz::escape::{Action, CSI};
 use thiserror::*;
@@ -120,17 +121,18 @@ const BUFSIZE: usize = 1024 * 1024;
 /// This function applies parsed actions to the pane and notifies any
 /// mux subscribers about the output event
 fn send_actions_to_mux(pane: &Weak<dyn Pane>, dead: &Arc<AtomicBool>, actions: Vec<Action>) {
-    let start = Instant::now();
+    wezterm_profiling::profile_zone!("send_actions_to_mux.perform_actions.latency", _latency_zone);
     match pane.upgrade() {
         Some(pane) => {
             pane.perform_actions(actions);
-            histogram!("send_actions_to_mux.perform_actions.latency").record(start.elapsed());
+            drop(_latency_zone);
             Mux::notify_from_any_thread(MuxNotification::PaneOutput(pane.pane_id()));
         }
         None => {
             // Something else removed the pane from
             // the mux, so signal that we should stop
             // trying to process it in read_from_pane_pty.
+            std::mem::forget(_latency_zone);
             dead.store(true, Ordering::Relaxed);
         }
     }

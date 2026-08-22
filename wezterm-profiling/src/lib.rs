@@ -46,10 +46,10 @@ pub type ProfilingZone = MetricsZone;
 #[macro_export]
 macro_rules! profile_zone {
     ($name:expr) => {
-        let _zone = $crate::ProfilingZone::begin($name);
+        let _zone = <$crate::ProfilingZone as $crate::ProfilingZoneBackend>::begin($name);
     };
     ($name:expr, $var:ident) => {
-        let $var = $crate::ProfilingZone::begin($name);
+        let $var = <$crate::ProfilingZone as $crate::ProfilingZoneBackend>::begin($name);
     };
 }
 

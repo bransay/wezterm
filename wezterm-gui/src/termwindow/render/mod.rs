@@ -30,6 +30,7 @@ use termwiz::surface::{CursorShape, CursorVisibility, SequenceNo};
 use wezterm_font::shaper::PresentationWidth;
 use wezterm_font::units::{IntPixelLength, PixelLength};
 use wezterm_font::{ClearShapeCache, GlyphInfo, LoadedFont};
+use wezterm_profiling::ProfilingZoneBackend;
 use wezterm_term::color::{ColorAttribute, ColorPalette};
 use wezterm_term::{CellAttributes, Line, StableRowIndex};
 use window::color::LinearRgba;
@@ -785,7 +786,7 @@ impl crate::TermWindow {
         font: Option<&Rc<LoadedFont>>,
         metrics: &RenderMetrics,
     ) -> anyhow::Result<Rc<Vec<ShapedInfo>>> {
-        let shape_resolve_start = Instant::now();
+        wezterm_profiling::profile_zone!("cached_cluster_shape", _shape_zone);
         let key = BorrowedShapeCacheKey {
             style,
             text: &cluster.text,
@@ -838,11 +839,10 @@ impl crate::TermWindow {
                 }
             }
         };
-        metrics::histogram!("cached_cluster_shape").record(shape_resolve_start.elapsed());
         log::trace!(
             "shape_resolve for cluster len {} -> elapsed {:?}",
             cluster.text.len(),
-            shape_resolve_start.elapsed()
+            _shape_zone.elapsed()
         );
         Ok(glyph_info)
     }

@@ -16,6 +16,7 @@ use mux::tab::PositionedPane;
 use ordered_float::NotNan;
 use std::time::Instant;
 use wezterm_dynamic::Value;
+use wezterm_profiling::ProfilingZoneBackend;
 use wezterm_term::color::{ColorAttribute, ColorPalette};
 use wezterm_term::{Line, StableRowIndex};
 use window::color::LinearRgba;
@@ -294,7 +295,7 @@ impl crate::TermWindow {
             (sel.range.clone(), sel.rectangular)
         };
 
-        let start = Instant::now();
+        wezterm_profiling::profile_zone!("paint_pane.lines", _lines_zone);
         let selection_fg = palette.selection_fg.to_linear();
         let selection_bg = palette.selection_bg.to_linear();
         let cursor_fg = palette.cursor_fg.to_linear();
@@ -576,8 +577,7 @@ impl crate::TermWindow {
             // TODO: render a thingy to jump to prior prompt
         }
         */
-        metrics::histogram!("paint_pane.lines").record(start.elapsed());
-        log::trace!("lines elapsed {:?}", start.elapsed());
+        log::trace!("lines elapsed {:?}", _lines_zone.elapsed());
 
         Ok(())
     }

@@ -5,6 +5,7 @@ pub use config::{FontStretch, FontWeight};
 use rangeset::RangeSet;
 use std::cmp::Ordering;
 use std::sync::Mutex;
+use wezterm_profiling::ProfilingZoneBackend;
 
 #[derive(Debug)]
 pub enum MaybeShaped {
@@ -540,12 +541,11 @@ impl ParsedFont {
     pub fn coverage_intersection(&self, wanted: &RangeSet<u32>) -> anyhow::Result<RangeSet<u32>> {
         let mut cov = self.coverage.lock().unwrap();
         if cov.is_empty() {
-            let t = std::time::Instant::now();
+            wezterm_profiling::profile_zone!("font.compute.codepoint.coverage", _coverage_zone);
             let lib = crate::ftwrap::Library::new()?;
             let face = lib.face_from_locator(&self.handle)?;
             *cov = face.compute_coverage();
-            let elapsed = t.elapsed();
-            metrics::histogram!("font.compute.codepoint.coverage").record(elapsed);
+            let elapsed = _coverage_zone.elapsed();
             log::debug!(
                 "{} codepoint coverage computed in {:?}",
                 self.names.full_name,

@@ -64,7 +64,7 @@ impl crate::TermWindow {
         let pos_y = (self.dimensions.pixel_height as f32 / -2.) + params.top_pixel_y;
         let gl_x = self.dimensions.pixel_width as f32 / -2.;
 
-        let start = Instant::now();
+        wezterm_profiling::profile_zone!("render_screen_line");
 
         let cursor_idx = if params.pane.is_some()
             && params.is_active
@@ -712,8 +712,6 @@ impl crate::TermWindow {
             )
             .context("populate_image_quad")?;
         }
-
-        metrics::histogram!("render_screen_line").record(start.elapsed());
 
         Ok(RenderScreenLineResult {
             invalidate_on_hover_change,

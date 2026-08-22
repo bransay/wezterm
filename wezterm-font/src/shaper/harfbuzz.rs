@@ -581,7 +581,7 @@ impl FontShaper for HarfbuzzShaper {
             "shape {range:?} `{}` with presentation={presentation:?}",
             text.escape_debug()
         );
-        let start = std::time::Instant::now();
+        wezterm_profiling::profile_zone!("shape.harfbuzz");
         let result = self.do_shape(
             0,
             text,
@@ -593,7 +593,6 @@ impl FontShaper for HarfbuzzShaper {
             range,
             presentation_width,
         );
-        metrics::histogram!("shape.harfbuzz").record(start.elapsed());
         /*
         if let Ok(glyphs) = &result {
             for g in glyphs {

@@ -323,13 +323,12 @@ impl std::fmt::Debug for HeapQuadAllocator {
 
 impl HeapQuadAllocator {
     pub fn apply_to(&self, other: &mut TripleLayerQuadAllocator) -> anyhow::Result<()> {
-        let start = std::time::Instant::now();
+        wezterm_profiling::profile_zone!("quad_buffer_apply");
         for (layer_num, quads) in [(0, &self.layer0), (1, &self.layer1), (2, &self.layer2)] {
             for quad in quads {
                 other.extend_with(layer_num, &quad.to_vertices());
             }
         }
-        metrics::histogram!("quad_buffer_apply").record(start.elapsed());
         Ok(())
     }
 }

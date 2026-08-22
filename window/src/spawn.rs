@@ -5,7 +5,7 @@ use core_foundation::runloop::*;
 use promise::spawn::{Runnable, SpawnFunc};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use wezterm_profiling::ProfilingZoneBackend;
 #[cfg(all(unix, not(target_os = "macos")))]
 use {
     filedescriptor::{FileDescriptor, Pipe},
@@ -18,7 +18,8 @@ lazy_static::lazy_static! {
 
 struct InstrumentedSpawnFunc {
     func: SpawnFunc,
-    at: Instant,
+    #[allow(dead_code)]
+    zone: wezterm_profiling::ProfilingZone,
 }
 
 pub(crate) struct SpawnQueue {
@@ -68,10 +69,8 @@ impl SpawnQueue {
     // returned function
     fn pop_func(&self) -> Option<SpawnFunc> {
         if let Some(func) = self.spawned_funcs.lock().unwrap().pop_front() {
-            metrics::histogram!("executor.spawn_delay").record(func.at.elapsed());
             Some(func.func)
         } else if let Some(func) = self.spawned_funcs_low_pri.lock().unwrap().pop_front() {
-            metrics::histogram!("executor.spawn_delay.low_pri").record(func.at.elapsed());
             Some(func.func)
         } else {
             None
@@ -79,9 +78,14 @@ impl SpawnQueue {
     }
 
     fn queue_func(&self, f: SpawnFunc, high_pri: bool) {
+        let name = if high_pri {
+            "executor.spawn_delay"
+        } else {
+            "executor.spawn_delay.low_pri"
+        };
         let f = InstrumentedSpawnFunc {
             func: f,
-            at: Instant::now(),
+            zone: wezterm_profiling::ProfilingZone::begin(name),
         };
         if high_pri {
             self.spawned_funcs.lock().unwrap()
