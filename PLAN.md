@@ -18,11 +18,10 @@ Only modify this file on phase completion or plan changes.
   - **Exit criteria:** Crate compiles, guard records to `metrics::histogram!` on Drop, no behavior change anywhere yet.
   - **Commit:** `e85ccd019`
 
-- [ ] **Phase 2: Add value/counter backends to the profiling crate**
+- [ ] **Phase 2: Value/counter recorder — DEFERRED**
   - **Goal:** Extend the crate with a `Recorder` trait (record/increment) and a `MetricsRecorder` backend handling fire-and-forget value and counter markers, with handle caching.
-  - **Deliverable:** `profile_value!` and `profile_counter!` macros with metrics backend.
-  - **Exit criteria:** Value/counter macros compile, backends cache handles, no behavior change elsewhere yet.
-  - **Commit:** <SHA filled in on completion>
+  - **Status:** Cut from current scope after design investigation (see DD-006, DD-008). The recorder and the label question (rpc/pdu per-method granularity) are deferred until the value/counter migration phase. Revisit before Phase 4. The crate is zones-only for now.
+  - **Commit:** —
 
 - [ ] **Phase 3: Migrate the 13 duration marker sites**
   - **Goal:** Replace every `let start = Instant::now(); ... metrics::histogram!("name").record(start.elapsed())` with `profile_zone!("name")` across all 13 duration sites.

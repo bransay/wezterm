@@ -89,3 +89,28 @@ Entry shape:
   - Keep calling `metrics::histogram!(name)` in Drop with a field-access name — rejected: hits the non-literal allocating path, a regression.
   - Store the raw `&'static str` and rely on the crate's literal fast path — impossible once the name passes through a struct field.
 - **Consequences:** Zone/value/counter backends must hold `metrics` handles, not names. Resolving the handle costs one mutex + HashMap lookup at `begin`/first-use; recording is a single dispatch afterward.
+
+## DD-007: Handle-cache mechanism is macro-level static, not recorder-held map
+- **Date:** 2026-08-22
+- **Phase:** Phase 2
+- **Status:** Accepted (recorder deferred by DD-008; principle recorded for when the recorder lands)
+- **Context:** Once backends resolve `metrics` handles (DD-006), the value/counter recorder needs somewhere to cache them. A stateless unit struct has nowhere to store per-(name,labels) handles.
+- **Decision:** Caching happens at the macro level via a `static HANDLE: LazyLock<...>` per call site, resolved once on first use. The recorder receives the pre-resolved handle, not a name. No map, no mutex after first init.
+- **Rationale:** All wezterm value/counter label values are `stringify!($token)`, which is a fixed `&'static str` per macro-expansion site, so the (name,labels) tuple is fully known at compile time per call site — a per-call-site `static` is sound. A recorder-held `Mutex<HashMap<...>>` would re-introduce a per-call lock+lookup, the same class of cost DD-006 eliminated from zones.
+- **Consequences:** The trait takes a pre-resolved handle (associated types). This couples resolution into the macro/backend, not the recorder. Deferred with the recorder (DD-008).
+- **Alternatives considered:**
+  - Recorder holds `Mutex<HashMap<(name,labels), Handle>>` — rejected: per-call mutex+lookup reintroduces the cost DD-006 removed.
+  - Single enum handle type (`Histogram | Counter`) — rejected (DD-008 discussion): forces a `match`/panic path on every record/increment when call sites are statically one kind.
+  - Two associated handle types (`ValueHandle`, `CounterHandle`) — chosen: each macro site is either a value or a counter, never both, so each static is statically the right type; no enum.
+
+## DD-008: Value/counter recorder cut from scope (deferred)
+- **Date:** 2026-08-22
+- **Phase:** Phase 2
+- **Status:** Accepted
+- **Context:** The value/counter recorder design kept expanding (labels, handle types, label value types, backend-agnostic label type). Reached the labeled rpc/pdu sites and realized the `metrics` label model (multi-dimension key-value) and Tracy's flat-plot model are fundamentally different, and labels are a migration-time concern, not a crate-time one.
+- **Decision:** Cut the entire recorder (`ProfilingRecorder`, `MetricsRecorder`, `profile_value!`, `profile_counter!`) out of current scope and rip it from `wezterm-profiling/src/lib.rs`. The crate is zones-only. Recorder + labels are deferred until the value/counter migration phase (Phase 4), when the concrete sites are in front of us.
+- **Rationale:** YAGNI. Zones are the point of the whole effort (frame-level spike analysis); values/counters are secondary. Designing the recorder and label threading before the actual migration sites are being touched was speculative — every label/type question got harder to answer in the abstract. Deferring lets the real call sites drive the design.
+- **Alternatives considered:**
+  - Land a label-less recorder now — rejected: would force rework when labels are needed at migration.
+  - Design the full label-threaded recorder now — rejected: the design questions (DD-007) ballooned with no immediate consumer.
+- **Consequences:** Phase 2 is effectively empty of new work; the crate is zones-only. The next real work is Phase 3 (migrate the 13 duration sites). The recorder design must be revisited fresh before Phase 4, informed by DD-006/DD-007.
