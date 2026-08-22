@@ -45,14 +45,14 @@ Entry shape:
 ## DD-003: Trait-based backend dispatch (not cfg-gated struct)
 - **Date:** 2026-08-22
 - **Phase:** Phase 1
-- **Status:** Accepted
+- **Status:** Superseded by DD-005 (two traits), DD-007 (handle caching)
 - **Context:** The profiling abstraction needs to support multiple backends (metrics always-on, Tracy opt-in) with backend-specific state. Two approaches considered: a single struct with `#[cfg]`-gated fields (wezterm's idiom for optional features like dhat), or a trait with per-backend impls.
 - **Decision:** Use a `ZoneBackend` trait. Each backend is a type with its own fields, implementing `ZoneBackend` (begin/elapsed) and `Drop` (end/recording). The guard is eliminated entirely — the macro returns the backend type directly. Composition of multiple backends uses a tuple impl `(A, B)` where `begin` constructs both and each element's `Drop` fires independently. A type alias `Default` swaps between `MetricsZone` and `(MetricsZone, TracyZone)` via `#[cfg(feature = "tracy")]`.
 - **Rationale:** Traits are the idiomatic Rust way to abstract over backends. Each backend owns its own state (metrics needs `Instant` + `&'static str`, Tracy needs `Span`) — a trait lets each type carry exactly what it needs without leaking backend-specific fields into a shared struct. The tuple composition pattern is idiomatic Rust for combining behaviors without wrapper types. No cfg on the guard itself, only on the type alias. Monomorphized to zero overhead.
 - **Alternatives considered:**
   - Cfg-gated concrete struct with backend-specific fields behind `#[cfg(feature = "tracy")]` — matches wezterm's dhat pattern but couples all backend state into one struct, requiring cfg on individual fields. Less clean when backends have divergent state shapes.
   - Cfg-gated enum (wezterm-ssh's `SessionWrap` pattern) — rejected: that pattern is for mutually-exclusive backends chosen at runtime. Our backends are additive (metrics + Tracy fire simultaneously), not exclusive.
-- **Consequences:** Adding a third backend = new struct + trait impl + tuple impl, no changes to call sites. The `ZoneBackend` trait has `begin(name: &'static str) -> Self`, `elapsed() -> Duration` (default `Duration::ZERO`). Tuple impl delegates `elapsed()` to first element (metrics is always first).
+- **Consequences:** Superseded by DD-005 (split into zone vs value/counter traits) and DD-007 (handle caching). The trait-composition idea survives; the single-trait surface did not.
 
 ## DD-004: Two-arm macro for bind vs fire-and-forget
 - **Date:** 2026-08-22
@@ -63,5 +63,29 @@ Entry shape:
 - **Rationale:** The macro is justified by precedent — `scopeguard::guard!`, `tracing::info_span!`, and `metrics::histogram!` itself are all macros that create RAII guards. Replacing `metrics::histogram!("name").record(start.elapsed())` (a macro call) with `profile_zone!("name")` (a macro call) is lateral, not a new pattern. The `let _zone =` binding carries no information — it's just a vehicle for Drop. Hiding it is exactly what `scopeguard` does.
 - **Alternatives considered:**
   - `paste` crate for hygienic unique names — rejected: adding a dep purely for syntax sugar is overkill. The bind arm is only used once.
-  - No macro, plain constructor call (`let _zone = Default::begin("name")`) — rejected: more verbose at 13 call sites, no benefit over macro since no metaprogramming is needed but the macro provides ergonomic value.
+  - No macro, plain constructor call (`let _zone = DefaultZone::begin("name")`) — rejected: more verbose at 13 call sites.
 - **Consequences:** Two arms in the macro. The bind arm is used once (paint.rs). If more sites need `elapsed()` later, the arm is already there.
+
+## DD-005: Two traits — ProfilingZoneBackend (RAII) and Recorder (fire-and-forget)
+- **Date:** 2026-08-22
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** The profiling abstraction covers three marker kinds: zones (RAII regions), values (point-in-time scalar samples), and counters (accumulating event counts). Zones are structurally different from values/counters — zones are guards with begin/elapsed/Drop; values/counters are fire-and-forget calls with no scope. Cramming both into one trait would force incongruous method shapes.
+- **Decision:** Two traits. `ProfilingZoneBackend` (begin/elapsed, RAII guard via `Drop`) for zones. `Recorder` (record/increment) for fire-and-forget values and counters. Zone names stay `profile_zone!`; value/counter names are `profile_value!`/`profile_counter!`.
+- **Rationale:** Zones and events are genuinely different shapes. A counter is not a histogram in disguise — `metrics::CounterFn` (stats.rs:125) is an `AtomicUsize` that accumulates via `fetch_add`, stored in a separate `counters` HashMap, and consumed as a raw total, whereas a histogram records a distribution of values. Collapsing them loses the semantic distinction. Two traits map cleanly onto the two shapes.
+- **Alternatives considered:**
+  - One trait with a single `record` and a flag — rejected: would misrecord counter events as histogram distributions.
+  - Collapse value and counter into one method — rejected: they do different things on the metrics backend.
+- **Consequences:** The name `Backend` alone became ambiguous with two traits — renamed to `ProfilingZoneBackend` (zone path) and `Recorder` (value/counter path).
+
+## DD-006: Handle-caching backends (not per-call key construction)
+- **Date:** 2026-08-22
+- **Phase:** Phase 1
+- **Status:** Accepted
+- **Context:** The `metrics` crate's `histogram!`/`counter!` macros only use a static cached `Key` (via `key_var!`) when the name is a compile-time literal. When the name reaches the macro as an expression (e.g. a field access like `self.name`), it falls back to `Key::from_name`/`from_parts` which heap-allocate a fresh `Key` and label `Vec` per event. Additionally, wezterm's `Stats::register_histogram` (stats.rs:324) takes a mutex + HashMap lookup on every macro invocation. My initial refactor routed the zone name through a `&'static str` field and called `metrics::histogram!(self.name)` in Drop — a field access is an expr, not a literal, so it forced the allocating path on every drop, a regression over the original literal sites.
+- **Decision:** Backends resolve the `metrics::Histogram`/`metrics::Counter` handle once and reuse it. `MetricsZone` stores `histogram: metrics::Histogram` (resolved in `begin`), and `Drop` calls `self.histogram.record(...)` — a single virtual dispatch, no key construction, no mutex. Value/counter backend uses a static handle cache (e.g. `LazyLock`) keyed by name, resolving each `metrics` handle once and reusing it.
+- **Rationale:** `metrics::Histogram::record` (handles.rs:142) is a single virtual dispatch through a stored `Arc`; it never needs the key again. `Histogram::from_arc` wraps the `Arc` already returned by `register_histogram`. So resolving once and holding the handle is strictly cheaper than re-invoking the macro per event — it skips both the key allocation and the mutex lock. This is the "work with handles/hashes, not strings" design.
+- **Alternatives considered:**
+  - Keep calling `metrics::histogram!(name)` in Drop with a field-access name — rejected: hits the non-literal allocating path, a regression.
+  - Store the raw `&'static str` and rely on the crate's literal fast path — impossible once the name passes through a struct field.
+- **Consequences:** Zone/value/counter backends must hold `metrics` handles, not names. Resolving the handle costs one mutex + HashMap lookup at `begin`/first-use; recording is a single dispatch afterward.
