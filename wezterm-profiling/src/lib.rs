@@ -41,31 +41,7 @@ impl<A: ProfilingZoneBackend, B: ProfilingZoneBackend> ProfilingZoneBackend for 
     }
 }
 
-pub trait ProfilingRecorder {
-    type Value;
-    type Counter;
-
-    fn record(&self, name: &'static str, value: Self::Value);
-    fn increment(&self, name: &'static str, amount: Self::Counter);
-}
-
-pub struct MetricsRecorder;
-
-impl ProfilingRecorder for MetricsRecorder {
-    type Value = f64;
-    type Counter = u64;
-
-    fn record(&self, name: &'static str, value: f64) {
-        metrics::histogram!(name).record(value);
-    }
-
-    fn increment(&self, name: &'static str, amount: u64) {
-        metrics::counter!(name).increment(amount);
-    }
-}
-
 pub type DefaultZone = MetricsZone;
-pub type DefaultRecorder = MetricsRecorder;
 
 #[macro_export]
 macro_rules! profile_zone {
@@ -74,23 +50,6 @@ macro_rules! profile_zone {
     };
     ($name:expr, $var:ident) => {
         let $var = $crate::DefaultZone::begin($name);
-    };
-}
-
-#[macro_export]
-macro_rules! profile_value {
-    ($name:expr, $value:expr) => {
-        $crate::DefaultRecorder.record($name, $value);
-    };
-}
-
-#[macro_export]
-macro_rules! profile_counter {
-    ($name:expr) => {
-        $crate::DefaultRecorder.increment($name, 1);
-    };
-    ($name:expr, $amount:expr) => {
-        $crate::DefaultRecorder.increment($name, $amount);
     };
 }
 
